@@ -19,7 +19,8 @@ use windows::{
 	core::Interface,
 };
 
-const MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
+// Padded NV12 at the live bound (4096×2304 plus alignment) with headroom.
+const MAX_OUTPUT_BYTES: usize = 24 * 1024 * 1024;
 /// 100 ns units per picture at a nominal 30 fps; only monotonicity matters to the decoder.
 const TICKS_PER_PICTURE: i64 = 333_333;
 
@@ -188,7 +189,7 @@ impl H264Decoder {
 					crop = (x, y, w, h);
 				}
 			}
-			super::check_dimensions(crop.2, crop.3)?;
+			super::check_live_dimensions(crop.2, crop.3)?;
 			if (stride as usize) * (height as usize) * 3 / 2 > MAX_OUTPUT_BYTES {
 				return Err(INVALID);
 			}

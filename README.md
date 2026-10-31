@@ -30,6 +30,10 @@ Windows uniquement. Chaque push sur `main` publie une nouvelle release automatiq
 - Un 401 ne vide plus le token : vérification de `/users/@me`, puis reconnexion auto (30 s, 2 min, 5 min).
 - Journal : `%LOCALAPPDATA%\serein\session.log` (aucun token ni ID dedans).
 
+**Streams**
+- Les streams en 1440p, 4K et ultrawide s'affichent (avant : le son passait mais l'image restait bloquée sur « waiting for video », Serein refusait tout au-dessus de 1080p).
+- Bascule auto vers le décodage logiciel si le décodeur GPU ne sort aucune image.
+
 **Divers**
 - Mise à jour auto désactivée (elle réinstallerait la version officielle).
 

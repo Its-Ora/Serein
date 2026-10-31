@@ -37,7 +37,23 @@ pub mod live;
 pub mod live;
 
 /// Largest live access unit any backend accepts.
-pub const MAX_ACCESS_UNIT: usize = 2 * 1024 * 1024 + 64 * 1024;
+pub const MAX_ACCESS_UNIT: usize = 8 * 1024 * 1024 + 64 * 1024;
+/// Live stream bounds (fork): 5120 px per side, up to 4096×2304 pixels — covers 1440p,
+/// 4K UHD and 5120×1440 ultrawide. Inline media keeps the 1080p `check_dimensions` bound.
+pub const MAX_LIVE_SIDE: u32 = 5120;
+pub const MAX_LIVE_PIXELS: u64 = 4096 * 2304;
+pub fn check_live_dimensions(width: u32, height: u32) -> Result<(), &'static str> {
+	if width == 0 || height == 0 {
+		return Err(INVALID);
+	}
+	if width > MAX_LIVE_SIDE
+		|| height > MAX_LIVE_SIDE
+		|| u64::from(width) * u64::from(height) > MAX_LIVE_PIXELS
+	{
+		return Err(TOO_LARGE);
+	}
+	Ok(())
+}
 
 /// One decoded live picture.
 pub type LiveFrame = Picture;
@@ -145,6 +161,14 @@ mod tests {
 	#[test]
 	fn rotation_and_bounds() {
 		assert!(check_dimensions(1920, 1080).is_ok());
+		// Live streams go past the inline 1080p bound (fork regression: 1440p/4K showed
+		// no picture), but stay bounded.
+		for (w, h) in [(2560, 1440), (3840, 2160), (3440, 1440), (5120, 1440)] {
+			assert!(check_live_dimensions(w, h).is_ok(), "{w}x{h}");
+			assert!(check_dimensions(w, h).is_err());
+		}
+		assert!(check_live_dimensions(7680, 4320).is_err());
+		assert!(check_live_dimensions(5121, 10).is_err());
 		assert!(check_dimensions(1921, 1).is_err());
 		assert!(check_dimensions(1920, 1920).is_err());
 		assert!(check_dimensions(0, 1).is_err());

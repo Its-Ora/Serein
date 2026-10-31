@@ -15,14 +15,17 @@ use std::{
 pub(crate) type Lost = Arc<Mutex<Vec<u64>>>;
 
 /// Largest reassembled (still DAVE-encrypted) access unit accepted from one remote sender.
-pub const MAX_FRAME_BYTES: usize = 2 * 1024 * 1024 + 64 * 1024;
+/// Fork: 1440p/4K keyframes exceed the upstream 2 MiB, which dropped every picture.
+pub const MAX_FRAME_BYTES: usize = platform::video::MAX_ACCESS_UNIT;
 /// Remote video senders tracked per transport; Discord forwards at most a few at once.
 pub const MAX_SOURCES: usize = 16;
 /// Decoders kept alive at once; each holds reference pictures for one remote user.
 const MAX_DECODERS: usize = 8;
-const QUEUE_BYTES: usize = 16 * 1024 * 1024;
-const MAX_WIDTH: u32 = 1920;
-const MAX_PIXELS: u64 = 1920 * 1080;
+const QUEUE_BYTES: usize = 64 * 1024 * 1024;
+/// Fork: live streams up to 4K/ultrawide (upstream stopped at 1080p, so 1440p and 4K
+/// streams showed "waiting for video" forever while their audio played).
+const MAX_WIDTH: u32 = platform::video::MAX_LIVE_SIDE;
+const MAX_PIXELS: u64 = platform::video::MAX_LIVE_PIXELS;
 const START_CODE: [u8; 4] = [0, 0, 0, 1];
 const MAX_DECODE_AGE: Duration = Duration::from_millis(150);
 
@@ -610,7 +613,12 @@ fn mark_broken(user: u64, broken: &mut Vec<u64>, lost: &Lost) {
 /// Hardware decoding where the OS offers it; the software decoder is the fallback and the
 /// only option on the other platforms. Hardware pictures reach the sink asynchronously.
 enum Backend {
-	Hardware(platform::video::live::H264Decoder),
+	/// The counter tracks pictures this decoder delivered, so a hardware path that accepts
+	/// input but never outputs can be replaced by software.
+	Hardware(
+		platform::video::live::H264Decoder,
+		Arc<std::sync::atomic::AtomicU64>,
+	),
 	Software(openh264::decoder::Decoder),
 }
 impl Backend {
@@ -625,10 +633,13 @@ impl Backend {
 			let sink = sink.clone();
 			let counters = counters.clone();
 			let lifetime = lifetime.clone();
+			let delivered = Arc::new(std::sync::atomic::AtomicU64::new(0));
+			let seen = delivered.clone();
 			let deliver: platform::video::LiveSink = Box::new(move |frame| {
 				if lifetime.load(Ordering::Acquire)
 					&& bounded(frame.width as usize, frame.height as usize).is_ok()
 				{
+					seen.fetch_add(1, Ordering::Relaxed);
 					counters.pictures.fetch_add(1, Ordering::Relaxed);
 					sink(RemoteFrame {
 						user,
@@ -637,7 +648,7 @@ impl Backend {
 				}
 			});
 			if let Ok(decoder) = platform::video::live::H264Decoder::new(deliver) {
-				return Some(Self::Hardware(decoder));
+				return Some(Self::Hardware(decoder, delivered));
 			}
 		}
 		openh264::decoder::Decoder::new().ok().map(Self::Software)
@@ -650,7 +661,7 @@ impl Backend {
 		scratch: &mut Vec<u8>,
 	) -> Result<Option<(u32, u32)>, DecodeError> {
 		match self {
-			Self::Hardware(decoder) => decoder.decode(data).map(|()| None).map_err(|error| {
+			Self::Hardware(decoder, _) => decoder.decode(data).map(|()| None).map_err(|error| {
 				if error == platform::video::BUSY {
 					DecodeError::Busy
 				} else {
@@ -702,11 +713,21 @@ impl Backend {
 	}
 	#[cfg(all(test, target_os = "macos"))]
 	fn flush(&self) {
-		if let Self::Hardware(decoder) = self {
+		if let Self::Hardware(decoder, _) = self {
 			decoder.flush();
 		}
 	}
+	/// Pictures a hardware decoder delivered so far; software reports pictures directly.
+	fn hardware_pictures(&self) -> Option<u64> {
+		match self {
+			Self::Hardware(_, delivered) => Some(delivered.load(Ordering::Relaxed)),
+			Self::Software(_) => None,
+		}
+	}
 }
+/// Keyframes a hardware decoder may swallow without a single picture before software
+/// takes over (fork: some GPU decoders accept 1440p/4K input and never output).
+const SILENT_HARDWARE_KEYFRAMES: u32 = 3;
 
 fn decode_loop(
 	receive: Receiver<Decode>,
@@ -721,6 +742,16 @@ fn decode_loop(
 	let mut software_only: Vec<u64> = Vec::new();
 	// After a decode error, predictions are skipped until a keyframe rebuilds the references.
 	let mut broken: Vec<u64> = Vec::new();
+	// Keyframes fed to a hardware decoder that has not delivered a picture yet.
+	let mut silent: HashMap<u64, u32> = HashMap::new();
+	// One log line per user and outcome, so a stuck stream is explained in session.log.
+	let mut logged: Vec<(u64, &'static str)> = Vec::new();
+	let mut note = |user: u64, what: &'static str| {
+		if !logged.contains(&(user, what)) && logged.len() < 64 {
+			logged.push((user, what));
+			client_core::session_log::record(&format!("Stream video: {what}"));
+		}
+	};
 	let mut scratch = Vec::new();
 	while let Ok(message) = receive.recv() {
 		let had_active = !active.is_empty();
@@ -730,6 +761,7 @@ fn decode_loop(
 				decoders.remove(user);
 				software_only.retain(|known| known != user);
 				broken.retain(|known| known != user);
+				silent.remove(user);
 			}
 			retained
 		});
@@ -756,7 +788,9 @@ fn decode_loop(
 			age.as_millis().min(u128::from(u64::MAX)) as u64,
 			Ordering::Relaxed,
 		);
-		if age > MAX_DECODE_AGE {
+		// A late keyframe is still decoded: it is the only thing that restarts the picture,
+		// and dropping it on a slow decoder made large streams loop on keyframe requests.
+		if age > MAX_DECODE_AGE && !frame.keyframe {
 			counters.stale.fetch_add(1, Ordering::Relaxed);
 			decoders.remove(&frame.user);
 			decoder_counts(&decoders, &counters);
@@ -767,6 +801,32 @@ fn decode_loop(
 			broken.retain(|user| *user != frame.user);
 		} else if broken.contains(&frame.user) {
 			continue;
+		}
+		// A hardware decoder that keeps swallowing keyframes without output is dropped here,
+		// so this keyframe goes straight to the software decoder created below.
+		if frame.keyframe
+			&& let Some(pictures) = decoders
+				.get(&frame.user)
+				.and_then(Backend::hardware_pictures)
+		{
+			if pictures > 0 {
+				silent.remove(&frame.user);
+			} else {
+				let count = silent.entry(frame.user).or_default();
+				*count += 1;
+				if *count > SILENT_HARDWARE_KEYFRAMES {
+					note(
+						frame.user,
+						"hardware decoder produced no picture; switched to software",
+					);
+					silent.remove(&frame.user);
+					decoders.remove(&frame.user);
+					if !software_only.contains(&frame.user) {
+						software_only.push(frame.user);
+					}
+					decoder_counts(&decoders, &counters);
+				}
+			}
 		}
 		if !decoders.contains_key(&frame.user) {
 			if decoders.len() >= MAX_DECODERS {
@@ -803,6 +863,14 @@ fn decode_loop(
 			Err(DecodeError::Failed) => {
 				// Corrupt or lost data: a fresh decoder waits for the next keyframe. A
 				// hardware decoder that fails on a keyframe is replaced by software.
+				note(
+					frame.user,
+					if hardware {
+						"hardware decode failed"
+					} else {
+						"software decode failed (resolution or data rejected)"
+					},
+				);
 				counters.errors.fetch_add(1, Ordering::Relaxed);
 				decoders.remove(&frame.user);
 				decoder_counts(&decoders, &counters);
@@ -818,6 +886,7 @@ fn decode_loop(
 		if !lifetime.load(Ordering::Acquire) {
 			continue;
 		}
+		note(frame.user, "first software picture decoded");
 		counters.pictures.fetch_add(1, Ordering::Relaxed);
 		sink(RemoteFrame {
 			user: frame.user,
@@ -833,7 +902,7 @@ fn decode_loop(
 	}
 	// Hardware pictures still in flight must land before the sink goes away.
 	for decoder in decoders.values() {
-		if let Backend::Hardware(decoder) = decoder {
+		if let Backend::Hardware(decoder, _) = decoder {
 			decoder.flush();
 		}
 	}
@@ -842,7 +911,7 @@ fn decode_loop(
 fn decoder_counts(decoders: &HashMap<u64, Backend>, counters: &DecoderCounters) {
 	let hardware = decoders
 		.values()
-		.filter(|decoder| matches!(decoder, Backend::Hardware(_)))
+		.filter(|decoder| matches!(decoder, Backend::Hardware(..)))
 		.count();
 	counters.hardware.store(hardware as u64, Ordering::Relaxed);
 	counters
@@ -1328,8 +1397,10 @@ mod tests {
 		assert!(!gated.accept(7, false));
 		assert!(is_keyframe(&[0, 0, 0, 1, 0x67, 1, 0, 0, 1, 0x65, 2]));
 		assert!(!is_keyframe(&[0, 0, 0, 1, 0x41, 9]));
-		assert!(bounded(1920, 1080).is_ok());
-		assert!(bounded(1920, 1081).is_err());
+		// Fork: 1440p and 4K streams decode (upstream rejected anything past 1080p).
+		assert!(bounded(2560, 1440).is_ok());
+		assert!(bounded(3840, 2160).is_ok());
+		assert!(bounded(7680, 4320).is_err());
 		assert!(bounded(0, 4).is_err());
 	}
 	#[test]
@@ -1452,7 +1523,7 @@ mod tests {
 		let lifetime = Arc::new(AtomicBool::new(true));
 		let mut decoder =
 			Backend::new(true, 9, &sink, &counters, &lifetime).expect("hardware backend");
-		assert!(matches!(decoder, Backend::Hardware(_)));
+		assert!(matches!(decoder, Backend::Hardware(..)));
 		let mut scratch = Vec::new();
 		for _ in 0..3 {
 			let encoded = encoder.encode(&yuv).unwrap();

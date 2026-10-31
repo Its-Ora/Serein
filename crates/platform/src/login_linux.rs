@@ -323,6 +323,10 @@ impl LoginView {
 		})
 	}
 
+	/// Linux keeps the token-only handoff; its webview already uses Serein's identity.
+	pub fn identity(&self) -> Option<client_core::fingerprint::Identity> {
+		None
+	}
 	pub fn token(&self) -> Option<SessionSecret> {
 		if !self.state.active() {
 			self.state.close();

@@ -36,6 +36,32 @@ function setup(origin = 'https://discord.com') {
   context.fetch('https://discord.com/api/v10/users/@me', {headers:{authorization:'SYNTHETIC_FETCH_MARKER'}});
   assert.equal(messages.length, 0);
 }
+// Fork: with identity enabled the token travels with the same request's identity headers,
+// delivered once all headers are set (at send for XHR).
+{
+  const messages = [];
+  class XHR { open() {} setRequestHeader() {} send() {} }
+  const identitySource = fs.readFileSync('crates/platform/src/login-handoff.js', 'utf8')
+    .replace('__SEREIN_LOGIN_CAPABILITY__', 'SYNTHETIC_CAPABILITY:')
+    .replace('__SEREIN_LOGIN_IDENTITY__', '1');
+  const context = { location: {origin: 'https://discord.com', href: 'https://discord.com/login'}, XMLHttpRequest: XHR, Headers, Request, URL, Date, WeakMap };
+  context.window = context; context.top = context;
+  context.ipc = {postMessage: value => messages.push(value)};
+  context.fetch = () => Promise.resolve();
+  vm.runInNewContext(identitySource, context);
+  const xhr = new context.XMLHttpRequest();
+  xhr.open('GET', '/api/v10/users/@me');
+  xhr.setRequestHeader('Authorization', 'SYNTHETIC_SESSION_MARKER');
+  assert.equal(messages.length, 0);
+  xhr.setRequestHeader('X-Super-Properties', 'eyJvcyI6IldpbmRvd3MifQ==');
+  xhr.setRequestHeader('X-Discord-Locale', 'fr');
+  xhr.setRequestHeader('X-Discord-Timezone', 'Europe/Paris');
+  xhr.setRequestHeader('X-Debug', 'two words');
+  xhr.send();
+  assert.deepEqual(messages, ['SYNTHETIC_CAPABILITY:SYNTHETIC_SESSION_MARKER\neyJvcyI6IldpbmRvd3MifQ==\nfr\nEurope/Paris']);
+  context.fetch('/api/v10/users/@me', {headers: {authorization: 'SYNTHETIC_SECOND'}});
+  assert.equal(messages.length, 1);
+}
 console.log('Authentication handoff: origin, byte cap, one-shot and fetch/XHR checks passed (synthetic only).');
 
 

@@ -487,6 +487,13 @@ Fork perso de Serein. Tout ce qui suit est côté client, rien n'est envoyé à 
   - token vraiment refusé (ou Gateway fermée en 4004) → la session s'arrête, mais **le token sauvegardé est gardé** et Serein retente seul après **30 s, 2 min puis 5 min**. Le token n'est oublié qu'après ces 3 échecs.
 - **Journal** : `%LOCALAPPDATA%\serein\session.log` note chaque fin de session, chaque 401 (route sans aucun ID, résultat de la revérification) et chaque reconnexion auto. Aucun token, message ou ID n'y est écrit. Taille limitée à 64 Ko.
 
+### Identité cohérente face à Discord (anti-révocation)
+- Constat (journal) : Discord révoquait la session Serein ~18 min après chaque login (Gateway 4004 puis 401). Cause probable : la fenêtre de login Windows (WebView2/Edge récent) créait la session, puis Serein l'utilisait en se présentant comme un autre navigateur (Chrome 128, locale `en-US`, fuseau `UTC`) — le profil d'un token volé.
+- Maintenant, au login, Serein **récupère l'identité exacte du client web Discord** de la fenêtre (`X-Super-Properties` avec user agent et numéro de build, locale, fuseau) et l'utilise pour **toutes** ses requêtes, la Gateway (identify + en-têtes `User-Agent`/`Origin` du WebSocket) et la fenêtre captcha.
+- Elle est gardée dans `%LOCALAPPDATA%\serein\login-identity.json` (pas un secret : c'est la description du navigateur que chaque requête envoie déjà) et revalidée à chaque démarrage. Le journal note « Login identity adopted ».
+- Identité par défaut (avant le premier login avec ce build) mise à jour : Chrome 156 au lieu de 128.
+- **Après installation, reconnecte-toi une fois** (email/QR) pour que l'identité soit capturée : un ancien token sauvegardé a été créé avec l'ancienne incohérence.
+
 ### Mises à jour
 - La mise à jour automatique de Serein est **désactivée** dans ce fork : elle installerait la version officielle et effacerait ces changements. Le journal des nouveautés reste consultable.
 - Pour récupérer un build : onglet **Actions** du fork → workflow **Ora Windows build** → dernier run → **Artifacts** → `serein-ora-windows` (installeur `serein-ora-setup.exe` ou zip portable).

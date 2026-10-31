@@ -72,11 +72,44 @@ use std::{sync::Arc, time::Duration};
 use zeroize::Zeroizing;
 
 /// Run explicit offline checks before native startup, or launch the configured desktop client.
+/// Fork: the login window's identity, kept beside the other device-local files. Not a
+/// secret: it is the browser description every Discord request already carries.
+fn save_login_identity(dir: &std::path::Path, identity: &client_core::fingerprint::Identity) {
+	let value = serde_json::json!({
+		"super_properties": identity.super_properties,
+		"locale": identity.locale,
+		"timezone": identity.timezone,
+	});
+	let _ = std::fs::write(dir.join("login-identity.json"), value.to_string());
+}
+fn load_login_identity(dir: &std::path::Path) {
+	let Ok(text) = std::fs::read_to_string(dir.join("login-identity.json")) else {
+		return;
+	};
+	if text.len() > 8192 {
+		return;
+	}
+	let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+		return;
+	};
+	let field = |key: &str| value.get(key).and_then(|v| v.as_str()).unwrap_or_default();
+	// Re-validated on every load, exactly like a fresh capture.
+	if let Some(identity) = platform::login_identity(
+		field("super_properties"),
+		field("locale"),
+		field("timezone"),
+	) {
+		client_core::fingerprint::adopt(identity);
+	}
+}
+
 fn main() -> eframe::Result {
 	platform::memory::tune_allocator();
 	// Fork: why sessions end, so silent logouts can be explained (%LOCALAPPDATA%\serein).
 	if let Ok(dir) = local_store::data_dir() {
 		client_core::session_log::set_path(dir.join("session.log"));
+		// Fork: talk to Discord as the web client that created the saved session.
+		load_login_identity(&dir);
 	}
 	#[cfg(all(debug_assertions, feature = "demo"))]
 	if std::env::args().any(|arg| arg == "--demo")
@@ -5177,6 +5210,16 @@ impl Desktop {
 		if let Some(login) = &self.login {
 			login.pump();
 			if let Some(secret) = login.token() {
+				if let Some(identity) = login.identity() {
+					client_core::session_log::record(&format!(
+						"Login identity adopted: {} {}",
+						identity.browser, identity.browser_version
+					));
+					if let Ok(dir) = local_store::data_dir() {
+						save_login_identity(&dir, &identity);
+					}
+					client_core::fingerprint::adopt(identity);
+				}
 				self.connect(secret, true, ctx);
 			} else if login.expired() {
 				let crashed = login.crashed();

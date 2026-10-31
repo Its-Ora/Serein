@@ -7,12 +7,61 @@
 //! web client. Nothing here carries account data; it is the same for every user.
 
 /// Chrome version advertised on Windows and Linux; bump together when refreshing.
-const CHROME_MAJOR: &str = "128";
+const CHROME_MAJOR: &str = "156";
 /// Safari version advertised on macOS, where the verification widget runs in WebKit.
 const SAFARI_VERSION: &str = "18.5";
 /// Build number of the official web client this fingerprint mirrors.
 pub const CLIENT_BUILD_NUMBER: u64 = 634_304;
 pub const LOCALE: &str = "en-US";
+
+/// Identity captured from Discord's own web client in the login window (fork addition).
+///
+/// Discord ties a session to the client that created it. The login window is a real
+/// browser engine (WebView2 on Windows) and its web client sends its own user agent and
+/// `X-Super-Properties`; if Serein then talks to Discord as a different browser, the
+/// session looks like a stolen token and is revoked. Adopting the captured identity keeps
+/// one identity for the whole life of the session. Values are validated by the caller
+/// (bounded ASCII); none of them is secret or account-specific.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Identity {
+	/// `X-Super-Properties` exactly as the web client sent it (base64).
+	pub super_properties: String,
+	/// Its decoded JSON object, reused verbatim as the Gateway identify properties.
+	pub properties: String,
+	pub user_agent: String,
+	pub browser: String,
+	pub browser_version: String,
+	/// `X-Discord-Locale`, e.g. `fr`.
+	pub locale: String,
+	/// `X-Discord-Timezone`, e.g. `Europe/Paris`.
+	pub timezone: String,
+}
+static ADOPTED: std::sync::RwLock<Option<Identity>> = std::sync::RwLock::new(None);
+
+/// Use this identity for every later REST client, upload and Gateway identify.
+pub fn adopt(identity: Identity) {
+	if let Ok(mut slot) = ADOPTED.write() {
+		*slot = Some(identity);
+	}
+}
+/// The adopted identity, if any.
+pub fn adopted() -> Option<Identity> {
+	ADOPTED.read().ok().and_then(|slot| slot.clone())
+}
+fn adopted_field(field: impl Fn(&Identity) -> &str) -> Option<String> {
+	ADOPTED
+		.read()
+		.ok()
+		.and_then(|slot| slot.as_ref().map(|identity| field(identity).to_owned()))
+}
+/// `X-Discord-Locale` value.
+pub fn locale() -> String {
+	adopted_field(|identity| &identity.locale).unwrap_or_else(|| LOCALE.to_owned())
+}
+/// `X-Discord-Timezone` value.
+pub fn timezone() -> String {
+	adopted_field(|identity| &identity.timezone).unwrap_or_else(|| "UTC".to_owned())
+}
 
 /// Discord's spelling of the host operating system.
 pub fn os_name() -> &'static str {
@@ -35,16 +84,22 @@ fn platform_token() -> &'static str {
 /// Browser name Discord expects in super-properties, matched to the engine the embedded
 /// hCaptcha widget actually runs in. A passcode solved in WebKit but submitted with a Chrome
 /// fingerprint reads as a relayed captcha and triggers phone verification.
-pub fn browser() -> &'static str {
+pub fn browser() -> String {
+	if let Some(browser) = adopted_field(|identity| &identity.browser) {
+		return browser;
+	}
 	if cfg!(target_os = "macos") {
-		"Safari"
+		"Safari".to_owned()
 	} else {
-		"Chrome"
+		"Chrome".to_owned()
 	}
 }
 
 /// Browser version paired with [`browser`].
 pub fn browser_version() -> String {
+	if let Some(version) = adopted_field(|identity| &identity.browser_version) {
+		return version;
+	}
 	if cfg!(target_os = "macos") {
 		SAFARI_VERSION.to_owned()
 	} else {
@@ -55,6 +110,9 @@ pub fn browser_version() -> String {
 /// `User-Agent` header value shared by REST, uploads, the Gateway identify and the
 /// embedded verification webview.
 pub fn user_agent() -> String {
+	if let Some(agent) = adopted_field(|identity| &identity.user_agent) {
+		return agent;
+	}
 	if cfg!(target_os = "macos") {
 		format!(
 			"Mozilla/5.0 ({}) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/{SAFARI_VERSION} Safari/605.1.15",
@@ -70,6 +128,9 @@ pub fn user_agent() -> String {
 
 /// Gateway `identify.d.properties` and the decoded `X-Super-Properties` payload.
 pub fn properties() -> String {
+	if let Some(properties) = adopted_field(|identity| &identity.properties) {
+		return properties;
+	}
 	// Hand-built JSON keeps this crate free of a serde dependency; every value is a fixed
 	// literal or a controlled ASCII string, so no escaping is required.
 	format!(
@@ -90,9 +151,14 @@ pub fn properties() -> String {
 
 /// `X-Super-Properties` header value: standard base64 of [`properties`].
 pub fn super_properties() -> String {
-	base64(properties().as_bytes())
+	adopted_field(|identity| &identity.super_properties)
+		.unwrap_or_else(|| base64(properties().as_bytes()))
 }
 
+/// Standard base64, for callers that build super-properties themselves.
+pub fn encode_base64(input: &[u8]) -> String {
+	base64(input)
+}
 fn base64(input: &[u8]) -> String {
 	const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 	let mut out = String::with_capacity(input.len().div_ceil(3) * 4);

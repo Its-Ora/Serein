@@ -353,12 +353,85 @@ fn discord_origin(value: &str) -> bool {
 fn login_navigation(value: &str) -> bool {
 	discord_origin(value) || captcha::hcaptcha_origin(value)
 }
+/// Fork: validates the identity headers Discord's web client sent with the login token.
+/// Returns `None` unless the super-properties decode to a bounded JSON object with a
+/// printable user agent; locale and timezone fall back to the defaults when malformed.
+pub fn login_identity(
+	super_properties: &str,
+	locale: &str,
+	timezone: &str,
+) -> Option<client_core::fingerprint::Identity> {
+	if super_properties.is_empty() || super_properties.len() > 4096 {
+		return None;
+	}
+	let decoded = decode_base64(super_properties)?;
+	let properties = String::from_utf8(decoded).ok()?;
+	let value: serde_json::Value = serde_json::from_str(&properties).ok()?;
+	let object = value.as_object()?;
+	let text = |key: &str, max: usize| {
+		object
+			.get(key)
+			.and_then(|value| value.as_str())
+			.filter(|value| {
+				!value.is_empty()
+					&& value.len() <= max
+					&& value.chars().all(|c| (' '..='~').contains(&c))
+			})
+			.map(str::to_owned)
+	};
+	let user_agent = text("browser_user_agent", 512)?;
+	let browser = text("browser", 64)?;
+	let browser_version = text("browser_version", 64).unwrap_or_default();
+	object.get("client_build_number")?.as_u64()?;
+	let short = |value: &str, max: usize, extra: &[char]| {
+		(!value.is_empty()
+			&& value.len() <= max
+			&& value
+				.chars()
+				.all(|c| c.is_ascii_alphanumeric() || extra.contains(&c)))
+		.then(|| value.to_owned())
+	};
+	Some(client_core::fingerprint::Identity {
+		super_properties: super_properties.to_owned(),
+		properties,
+		user_agent,
+		browser,
+		browser_version,
+		locale: short(locale, 16, &['-'])
+			.unwrap_or_else(|| client_core::fingerprint::LOCALE.into()),
+		timezone: short(timezone, 64, &['/', '_', '-', '+']).unwrap_or_else(|| "UTC".into()),
+	})
+}
+fn decode_base64(input: &str) -> Option<Vec<u8>> {
+	let mut out = Vec::with_capacity(input.len() / 4 * 3);
+	let mut buffer = 0u32;
+	let mut bits = 0;
+	for byte in input.bytes() {
+		let value = match byte {
+			b'A'..=b'Z' => byte - b'A',
+			b'a'..=b'z' => byte - b'a' + 26,
+			b'0'..=b'9' => byte - b'0' + 52,
+			b'+' | b'-' => 62,
+			b'/' | b'_' => 63,
+			b'=' => break,
+			_ => return None,
+		};
+		buffer = (buffer << 6) | u32::from(value);
+		bits += 6;
+		if bits >= 8 {
+			bits -= 8;
+			out.push((buffer >> bits) as u8);
+		}
+	}
+	Some(out)
+}
 /// Receives only the account token used by THIS ephemeral, owner-operated login page.
 /// No browser-profile reads, password interception, console instructions, or QR exchange implementation.
 #[cfg(not(target_os = "linux"))]
 pub struct LoginView {
 	view: WebView,
-	tokens: Receiver<SessionSecret>,
+	tokens: Receiver<(SessionSecret, Option<client_core::fingerprint::Identity>)>,
+	identity: std::cell::RefCell<Option<client_core::fingerprint::Identity>>,
 	opened: Instant,
 }
 #[cfg(not(target_os = "linux"))]
@@ -375,8 +448,9 @@ impl LoginView {
 			.map(|byte| format!("{byte:02x}"))
 			.collect::<String>()
 			+ ":";
-		let script =
-			include_str!("login-handoff.js").replace("__SEREIN_LOGIN_CAPABILITY__", &capability);
+		let script = include_str!("login-handoff.js")
+			.replace("__SEREIN_LOGIN_CAPABILITY__", &capability)
+			.replace("__SEREIN_LOGIN_IDENTITY__", "1");
 		let builder = WebViewBuilder::new()
 			.with_url("https://discord.com/login")
 			.with_incognito(true)
@@ -386,15 +460,25 @@ impl LoginView {
 			.with_new_window_req_handler(|_, _| wry::NewWindowResponse::Deny)
 			.with_download_started_handler(|_, _| false)
 			.with_ipc_handler(move |request| {
-				if !discord_origin(&request.uri().to_string()) || request.body().len() > 2113 {
+				// Token (2048) + super-properties (4096) + locale + timezone + separators.
+				if !discord_origin(&request.uri().to_string()) || request.body().len() > 6400 {
 					return;
 				}
 				let body = zeroize::Zeroizing::new(request.into_body());
 				let Some(value) = body.strip_prefix(&capability) else {
 					return;
 				};
-				if let Ok(secret) = SessionSecret::from_owner_input(value.to_owned()) {
-					let _ = send.try_send(secret);
+				let mut parts = value.split('\n');
+				let token = parts.next().unwrap_or_default();
+				let identity = login_identity(
+					parts.next().unwrap_or_default(),
+					parts.next().unwrap_or_default(),
+					parts.next().unwrap_or_default(),
+				);
+				if token.len() <= 2048
+					&& let Ok(secret) = SessionSecret::from_owner_input(token.to_owned())
+				{
+					let _ = send.try_send((secret, identity));
 					wake();
 				}
 			});
@@ -405,11 +489,18 @@ impl LoginView {
 		Ok(Self {
 			view,
 			tokens,
+			identity: std::cell::RefCell::new(None),
 			opened: Instant::now(),
 		})
 	}
 	pub fn token(&self) -> Option<SessionSecret> {
-		self.tokens.try_recv().ok()
+		let (secret, identity) = self.tokens.try_recv().ok()?;
+		*self.identity.borrow_mut() = identity;
+		Some(secret)
+	}
+	/// The web client identity that came with the last token, if it validated.
+	pub fn identity(&self) -> Option<client_core::fingerprint::Identity> {
+		self.identity.borrow().clone()
 	}
 	pub fn expired(&self) -> bool {
 		self.opened.elapsed() > Duration::from_secs(600)
@@ -441,6 +532,36 @@ mod tests {
 		#[cfg(not(feature = "development-data"))]
 		assert_eq!(ACCOUNT, "discord-session");
 		assert_eq!(account_entry(model::Id(7)), format!("{ACCOUNT}.7"));
+	}
+	#[test]
+	fn login_identity_keeps_valid_web_client_headers_only() {
+		let properties = r#"{"os":"Windows","browser":"Edge","browser_user_agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) Edg/156.0.0.0","browser_version":"156.0.0.0","client_build_number":512345}"#;
+		let encoded = client_core::fingerprint::encode_base64(properties.as_bytes());
+		let identity = login_identity(&encoded, "fr", "Europe/Paris").unwrap();
+		assert_eq!(identity.properties, properties);
+		assert_eq!(identity.browser, "Edge");
+		assert!(identity.user_agent.ends_with("Edg/156.0.0.0"));
+		assert_eq!(
+			(identity.locale.as_str(), identity.timezone.as_str()),
+			("fr", "Europe/Paris")
+		);
+		// Malformed locale/timezone fall back instead of reaching a header.
+		let identity = login_identity(&encoded, "fr\r\nX: y", "../etc").unwrap();
+		assert_eq!(identity.timezone, "UTC");
+		assert_eq!(identity.locale, client_core::fingerprint::LOCALE);
+		// No build number, not an object, not base64, or a control character in the agent.
+		for bad in [
+			client_core::fingerprint::encode_base64(
+				br#"{"browser":"Edge","browser_user_agent":"x"}"#,
+			),
+			client_core::fingerprint::encode_base64(b"[1]"),
+			"%%%".to_owned(),
+			client_core::fingerprint::encode_base64(
+				br#"{"browser":"Edge","browser_user_agent":"a\nb","client_build_number":1}"#,
+			),
+		] {
+			assert!(login_identity(&bad, "fr", "UTC").is_none());
+		}
 	}
 	#[test]
 	fn handoff_accepts_only_our_discord_origin() {

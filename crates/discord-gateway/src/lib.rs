@@ -1255,10 +1255,29 @@ async fn run_recoverable(
 			.max_frame_size(Some(MAX_GATEWAY_WIRE))
 			.write_buffer_size(0)
 			.max_write_buffer_size(64 * 1024);
+		// A browser opens the Gateway with its user agent and Discord's origin.
+		let request = {
+			use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+			let Ok(mut request) = url.into_client_request() else {
+				return Err(Failure::Protocol);
+			};
+			if let Ok(agent) = tokio_tungstenite::tungstenite::http::HeaderValue::from_str(
+				&client_core::fingerprint::user_agent(),
+			) {
+				request.headers_mut().insert("User-Agent", agent);
+			}
+			request.headers_mut().insert(
+				"Origin",
+				tokio_tungstenite::tungstenite::http::HeaderValue::from_static(
+					"https://discord.com",
+				),
+			);
+			request
+		};
 		let Some(connection) = recoverable_wait(
 			timeout(
 				Duration::from_secs(15),
-				connect_async_with_config(url, Some(config), false),
+				connect_async_with_config(request, Some(config), false),
 			),
 			if was_ready { reconnect } else { None },
 		)

@@ -201,14 +201,25 @@ fn fingerprint_headers() -> Result<reqwest::header::HeaderMap, Failure> {
 		HeaderValue::from_str(&client_core::fingerprint::super_properties())
 			.map_err(|_| Failure::Network)?,
 	);
+	let locale = client_core::fingerprint::locale();
 	headers.insert(
 		"x-discord-locale",
-		HeaderValue::from_static(client_core::fingerprint::LOCALE),
+		HeaderValue::from_str(&locale).map_err(|_| Failure::Network)?,
 	);
-	headers.insert("x-discord-timezone", HeaderValue::from_static("UTC"));
+	headers.insert(
+		"x-discord-timezone",
+		HeaderValue::from_str(&client_core::fingerprint::timezone())
+			.map_err(|_| Failure::Network)?,
+	);
+	// Same language preference a browser in that locale sends.
+	let language = if locale.starts_with("en") {
+		"en-US,en;q=0.9".to_owned()
+	} else {
+		format!("{locale},en-US;q=0.9,en;q=0.8")
+	};
 	headers.insert(
 		reqwest::header::ACCEPT_LANGUAGE,
-		HeaderValue::from_static("en-US,en;q=0.9"),
+		HeaderValue::from_str(&language).map_err(|_| Failure::Network)?,
 	);
 	headers.insert(
 		reqwest::header::ORIGIN,

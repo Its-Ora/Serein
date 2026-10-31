@@ -12,13 +12,34 @@ pub(super) const RAIL_AVATAR: f32 = 42.0;
 /// Inset from the rail edge; centres a tile in the column.
 const RAIL_MARGIN: i8 = ((RAIL_WIDTH - RAIL_TILE) / 2.0) as i8;
 
+/// Server rail activity: unread flag plus pings split by kind.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub(super) struct GuildBadge {
+	pub unread: bool,
+	/// Direct `@you` pings, shown blue.
+	pub direct: u32,
+	/// Role, @everyone and @here pings, shown red.
+	pub group: u32,
+}
+impl GuildBadge {
+	pub(super) fn add(self, other: Self) -> Self {
+		Self {
+			unread: self.unread || other.unread,
+			direct: self.direct.saturating_add(other.direct),
+			group: self.group.saturating_add(other.group),
+		}
+	}
+}
+/// Blue for direct `@you` pings; the red group badge keeps the theme's badge fill.
+pub(super) const DIRECT_BADGE: Color32 = Color32::from_rgb(0x2F, 0x80, 0xED);
+
 #[derive(Default)]
 pub(super) struct RailCache {
 	key: Option<(u64, u64, bool, Option<Id>)>,
-	// Fixed-size records only: at most MAX_NAV * size_of::<(Id, (bool, u32))>() bytes
+	// Fixed-size records only: at most MAX_NAV * size_of::<(Id, GuildBadge)>() bytes
 	// for badges, 15 * size_of::<Id>() bytes for direct-message rows and at most
 	// voice::MAX_ROSTER * size_of::<Id>() bytes for servers with someone in voice.
-	guild_badges: Box<[(Id, (bool, u32))]>,
+	guild_badges: Box<[(Id, GuildBadge)]>,
 	direct: Box<[Id]>,
 	voice_guilds: Box<[Id]>,
 }
@@ -34,15 +55,17 @@ impl RailCache {
 		if self.key == Some(key) {
 			return false;
 		}
-		let mut badges = std::collections::BTreeMap::<Id, (bool, u32)>::new();
+		let mut badges = std::collections::BTreeMap::<Id, GuildBadge>::new();
 		let now = std::time::SystemTime::now()
 			.duration_since(std::time::UNIX_EPOCH)
 			.map_or(0, |elapsed| elapsed.as_millis() as i64);
 		for channel in state.channels.iter().take(client_core::MAX_NAV) {
 			if let Some(guild) = channel.guild {
 				let entry = badges.entry(guild).or_default();
-				entry.0 |= state.lights_guild_rail(channel, now);
-				entry.1 = entry.1.saturating_add(state.mention_count(channel.id));
+				entry.unread |= state.lights_guild_rail(channel, now);
+				let (direct, group) = state.mention_split(channel.id);
+				entry.direct = entry.direct.saturating_add(direct);
+				entry.group = entry.group.saturating_add(group);
 			}
 		}
 		self.guild_badges = badges.into_iter().collect();
@@ -55,7 +78,7 @@ impl RailCache {
 		self.key = Some(key);
 		true
 	}
-	pub(super) fn guild_badge(&self, guild: Id) -> (bool, u32) {
+	pub(super) fn guild_badge(&self, guild: Id) -> GuildBadge {
 		self.guild_badges
 			.binary_search_by_key(&guild, |(id, _)| *id)
 			.map(|index| self.guild_badges[index].1)
@@ -115,25 +138,42 @@ pub(super) fn row_activity(state: &State, channel: &model::Channel, visible: boo
 pub(super) fn badge(ui: &egui::Ui, center: egui::Pos2, count: u32, ring: Color32) {
 	badge_scaled(ui, center, count, ring, 1.0);
 }
-fn badge_scaled(ui: &egui::Ui, center: egui::Pos2, count: u32, ring: Color32, scale: f32) {
-	let label = if count > 99 {
-		"99+".into()
-	} else {
-		count.to_string()
-	};
-	let width = if count > 99 {
+fn badge_width(count: u32) -> f32 {
+	if count > 99 {
 		29.0
 	} else if count > 9 {
 		23.0
 	} else {
 		18.0
+	}
+}
+fn badge_scaled(ui: &egui::Ui, center: egui::Pos2, count: u32, ring: Color32, scale: f32) {
+	badge_filled(
+		ui,
+		center,
+		count,
+		ring,
+		design::palette(ui).badge_fill(),
+		scale,
+	);
+}
+fn badge_filled(
+	ui: &egui::Ui,
+	center: egui::Pos2,
+	count: u32,
+	ring: Color32,
+	fill: Color32,
+	scale: f32,
+) {
+	let label = if count > 99 {
+		"99+".into()
+	} else {
+		count.to_string()
 	};
-	let rect = egui::Rect::from_center_size(center, egui::vec2(width, 18.0) * scale);
-	let colors = design::palette(ui);
+	let rect = egui::Rect::from_center_size(center, egui::vec2(badge_width(count), 18.0) * scale);
 	ui.painter()
 		.rect_filled(rect.expand(2.0 * scale), (11.0 * scale) as u8, ring);
-	ui.painter()
-		.rect_filled(rect, (9.0 * scale) as u8, colors.badge_fill());
+	ui.painter().rect_filled(rect, (9.0 * scale) as u8, fill);
 	// A fixed text size keeps the pop-in from laying out glyphs at every intermediate size.
 	if scale < 0.8 {
 		return;
@@ -211,6 +251,43 @@ pub(super) fn rail_badge(ui: &egui::Ui, id: egui::Id, rect: egui::Rect, count: u
 		shown,
 	);
 }
+/// Server ping badges: blue for direct `@you`, red for role/@everyone/@here. When both
+/// exist they sit side by side, red at the corner and blue to its left.
+pub(super) fn rail_ping_badges(
+	ui: &egui::Ui,
+	id: egui::Id,
+	rect: egui::Rect,
+	badge: GuildBadge,
+	ring: Color32,
+) {
+	if !ui.is_rect_visible(rect) {
+		return;
+	}
+	let shown = ui.ctx().animate_bool_with_time_and_easing(
+		id.with("rail-badge"),
+		badge.direct > 0 || badge.group > 0,
+		rail_motion(ui) * 1.5,
+		egui::emath::easing::back_out,
+	);
+	if (badge.direct == 0 && badge.group == 0) || shown <= 0.0 {
+		return;
+	}
+	let corner = rect.right_bottom() - egui::vec2(8.0, 8.0);
+	let red = design::palette(ui).badge_fill();
+	match (badge.direct, badge.group) {
+		(direct, 0) => badge_filled(ui, corner, direct, ring, DIRECT_BADGE, shown),
+		(0, group) => badge_filled(ui, corner, group, ring, red, shown),
+		(direct, group) => {
+			// Right-align the red badge to the usual corner, blue just left of it.
+			let red_width = badge_width(group);
+			let red_center = corner + egui::vec2((18.0 - red_width) / 2.0, 0.0);
+			let blue_center =
+				red_center - egui::vec2((red_width + badge_width(direct)) / 2.0 + 3.0, 0.0) * shown;
+			badge_filled(ui, blue_center, direct, ring, DIRECT_BADGE, shown);
+			badge_filled(ui, red_center, group, ring, red, shown);
+		}
+	}
+}
 /// Green speaker badge on the rail avatar of the conversation you are calling in.
 fn call_badge(ui: &egui::Ui, rect: egui::Rect) {
 	speaker_badge(ui, rect, design::palette(ui).positive, Color32::WHITE);
@@ -246,6 +323,57 @@ fn indicator(ui: &egui::Ui, id: egui::Id, response: &egui::Response, unread: boo
 	rail_badge(ui, id, response.rect, count, design::palette(ui).base);
 }
 impl MessagingUi {
+	/// One-click "read all" under the home tile: acknowledges every unread server channel
+	/// in one bulk request. Direct messages keep their unread state.
+	fn read_all_servers_tile(
+		&mut self,
+		ui: &mut egui::Ui,
+		state: &mut State,
+		commands: &mut Vec<Command>,
+	) {
+		let colors = design::palette(ui);
+		let available = state.can_mark_servers_read();
+		let (rect, response) = ui.allocate_exact_size(
+			egui::vec2(RAIL_TILE, 28.0),
+			if available {
+				egui::Sense::click()
+			} else {
+				egui::Sense::hover()
+			},
+		);
+		let hovered = available && (response.hovered() || response.has_focus());
+		let fill = if hovered {
+			colors.positive
+		} else {
+			colors.raised
+		};
+		ui.painter().rect_filled(rect, 10, fill);
+		let glyph = if hovered {
+			Color32::WHITE
+		} else if available {
+			colors.text
+		} else {
+			colors.muted
+		};
+		crate::icons::paint(
+			ui.painter(),
+			crate::icons::Icon::Check,
+			egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(16.0)),
+			glyph,
+		);
+		let label = if available {
+			"Tout marquer comme lu (serveurs)"
+		} else {
+			"Aucun serveur non lu"
+		};
+		response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, available, label));
+		design::rail_name(&response, label);
+		if response.clicked()
+			&& let Some(command) = state.prepare_mark_servers_read()
+		{
+			commands.push(command);
+		}
+	}
 	pub fn viewing_latest(&self, channel: Id) -> bool {
 		self.timeline.viewing_latest(channel)
 	}
@@ -328,6 +456,7 @@ impl MessagingUi {
 					}
 					self.search.open = false;
 				}
+				self.read_all_servers_tile(ui, state, commands);
 				self.scroll
 					.attach(
 						ui,
@@ -601,7 +730,8 @@ mod tests {
 		assert_eq!(state.home_request_parts(), (2, 2));
 		assert_eq!(state.home_request_count(), 4);
 		assert!(cache.sync(&state));
-		assert_eq!(cache.guild_badge(Id(10)), (true, 1));
+		let badge = cache.guild_badge(Id(10));
+		assert_eq!((badge.unread, badge.direct + badge.group), (true, 1));
 		for _ in 0..10 {
 			assert!(!cache.sync(&state));
 		}
@@ -641,7 +771,7 @@ mod tests {
 			Event::Permissions(client_core::permissions::Event::UnavailableGuild(Id(10))),
 		);
 		assert!(cache.sync(&state));
-		assert_eq!(cache.guild_badge(Id(10)), (false, 0));
+		assert_eq!(cache.guild_badge(Id(10)), GuildBadge::default());
 		apply(&mut state, Event::Unavailable(Id(22)));
 		assert!(cache.sync(&state));
 		assert!(cache.direct.is_empty());

@@ -78,6 +78,8 @@ enum Pending {
 enum Scope {
 	/// Every server channel and direct message.
 	All,
+	/// Every server channel; direct messages keep their state.
+	Servers,
 	/// Channels of these servers, sorted and bounded by the folder guild limit.
 	Guilds(Box<[Id]>),
 }
@@ -95,6 +97,7 @@ impl Scope {
 	fn covers(&self, guild: Option<Id>) -> bool {
 		match self {
 			Self::All => true,
+			Self::Servers => guild.is_some(),
 			Self::Guilds(guilds) => guild.is_some_and(|guild| guilds.binary_search(&guild).is_ok()),
 		}
 	}
@@ -595,6 +598,14 @@ impl State {
 	/// One bulk acknowledgement for every unread channel; capped batches continue on success.
 	pub fn prepare_mark_all_read(&mut self) -> Option<crate::Command> {
 		self.prepare_bulk_ack(Scope::All)
+	}
+	/// Any unread server channel; direct messages are not counted.
+	pub fn can_mark_servers_read(&self) -> bool {
+		self.can_bulk_ack(&Scope::Servers)
+	}
+	/// Bulk acknowledgement for every unread server channel, leaving direct messages unread.
+	pub fn prepare_mark_servers_read(&mut self) -> Option<crate::Command> {
+		self.prepare_bulk_ack(Scope::Servers)
 	}
 	/// One bulk acknowledgement for the unread channels of these servers.
 	pub fn prepare_mark_guilds_read(&mut self, guilds: &[Id]) -> Option<crate::Command> {

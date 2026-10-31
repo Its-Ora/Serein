@@ -47,9 +47,14 @@ fn alert_text(text: &str, chars: usize, bytes: usize) -> String {
 #[derive(Default)]
 pub(crate) struct Activity {
 	counts: BTreeMap<Id, u32>,
+	/// Part of the service mention count known to be direct `@you` pings; the rest
+	/// (role, @everyone, @here or not yet classified) stays red.
+	direct_counts: BTreeMap<Id, u32>,
 	high_water: BTreeMap<Id, Id>,
-	observed_counts: BTreeMap<Id, (u32, u32)>,
-	observed: VecDeque<(Id, Id, bool)>,
+	/// (messages, mentions, direct mentions) observed since the service count.
+	observed_counts: BTreeMap<Id, (u32, u32, u32)>,
+	/// (channel, message, mention kind): 0 none, 1 group mention, 2 direct mention.
+	observed: VecDeque<(Id, Id, u8)>,
 	notifications: VecDeque<Notification>,
 }
 impl Activity {
@@ -62,6 +67,7 @@ impl Activity {
 	}
 	fn revoke(&mut self, channel: Id) {
 		self.counts.remove(&channel);
+		self.direct_counts.remove(&channel);
 		self.observed_counts.remove(&channel);
 		self.observed.retain(|(c, ..)| *c != channel);
 		self.notifications.retain(|n| n.channel != channel);
@@ -81,6 +87,25 @@ impl Activity {
 	}
 	pub(crate) fn set_count(&mut self, channel: Id, count: u32) {
 		self.counts.insert(channel, count);
+		self.clamp_direct(channel);
+	}
+	/// Direct pings found for a service count (recent-mentions inbox), capped by that count.
+	pub(crate) fn set_direct_count(&mut self, channel: Id, direct: u32) {
+		if direct == 0 {
+			self.direct_counts.remove(&channel);
+		} else {
+			self.direct_counts.insert(channel, direct);
+			self.clamp_direct(channel);
+		}
+	}
+	fn clamp_direct(&mut self, channel: Id) {
+		let total = self.counts.get(&channel).copied().unwrap_or(0);
+		if let Some(direct) = self.direct_counts.get_mut(&channel) {
+			*direct = (*direct).min(total);
+			if *direct == 0 {
+				self.direct_counts.remove(&channel);
+			}
+		}
 	}
 	pub(crate) fn ack(&mut self, channel: Id, message: Option<Id>, count: Option<u32>) {
 		self.observed
@@ -90,19 +115,25 @@ impl Activity {
 		// The service count includes messages after this ACK. Avoid counting those twice.
 		if let Some(count) = count {
 			self.counts.insert(channel, count);
+			if count == 0 {
+				self.direct_counts.remove(&channel);
+			}
+			self.clamp_direct(channel);
 			self.observed.retain(|(c, ..)| *c != channel);
 		} else {
 			// Without a refreshed service count, only retained observed messages are countable.
 			self.counts.remove(&channel);
+			self.direct_counts.remove(&channel);
 		}
 		self.recount(channel);
 	}
 	fn recount(&mut self, channel: Id) {
-		let mut counts = (0, 0);
-		for (c, _, mention) in &self.observed {
+		let mut counts = (0, 0, 0);
+		for (c, _, kind) in &self.observed {
 			if *c == channel {
 				counts.0 += 1;
-				counts.1 += u32::from(*mention);
+				counts.1 += u32::from(*kind > 0);
+				counts.2 += u32::from(*kind == 2);
 			}
 		}
 		if counts.0 == 0 {
@@ -110,6 +141,15 @@ impl Activity {
 		} else {
 			self.observed_counts.insert(channel, counts);
 		}
+	}
+	/// Direct `@you` pings among the channel's mentions.
+	fn direct(&self, channel: Id) -> u32 {
+		let observed = self.observed_counts.get(&channel).map_or(0, |c| c.2);
+		self.direct_counts
+			.get(&channel)
+			.copied()
+			.unwrap_or(0)
+			.saturating_add(observed)
 	}
 	fn count(&self, channel: Id, mentions_only: bool) -> u32 {
 		let counts = self
@@ -583,6 +623,15 @@ impl State {
 			0
 		}
 	}
+	/// Mentions split as (direct `@you`, group: role/@everyone/@here or unclassified).
+	pub fn mention_split(&self, channel: Id) -> (u32, u32) {
+		let total = self.mention_count(channel);
+		if total == 0 {
+			return (0, 0);
+		}
+		let direct = self.read_state.activity.direct(channel).min(total);
+		(direct, total - direct)
+	}
 	pub(crate) fn reconcile_notifications(&mut self) {
 		let activity = &self.read_state.activity;
 		let revoked: BTreeSet<_> = activity
@@ -923,6 +972,9 @@ impl State {
 			return;
 		}
 		let direct = message.mentions.iter().any(|u| u.id == owner.id);
+		let guild_channel = self
+			.channel(message.channel)
+			.is_some_and(|channel| channel.guild.is_some());
 		let mention = self.counts_toward_mention_badge(message);
 		// Silent messages still contribute to badges, but never enqueue an OS alert.
 		let allowed = !message.suppress_notifications
@@ -932,24 +984,32 @@ impl State {
 			let activity = &mut self.read_state.activity;
 			// ponytail: retain 4096 observed messages; counts become a lower bound after eviction.
 			while activity.observed.len() >= MAX_OBSERVED
-				|| (activity.observed.len() + 1) * size_of::<(Id, Id, bool)>() > MAX_OBSERVED_BYTES
+				|| (activity.observed.len() + 1) * size_of::<(Id, Id, u8)>() > MAX_OBSERVED_BYTES
 			{
-				if let Some((channel, _, mention)) = activity.observed.pop_front()
+				if let Some((channel, _, kind)) = activity.observed.pop_front()
 					&& let Some(counts) = activity.observed_counts.get_mut(&channel)
 				{
 					counts.0 -= 1;
-					counts.1 -= u32::from(mention);
+					counts.1 -= u32::from(kind > 0);
+					counts.2 -= u32::from(kind == 2);
 					if counts.0 == 0 {
 						activity.observed_counts.remove(&channel);
 					}
 				}
 			}
+			// A direct ping in a server is blue; DMs count as plain unreads, not pings.
+			let kind = match (mention, direct && guild_channel) {
+				(false, _) => 0,
+				(true, true) => 2,
+				(true, false) => 1,
+			};
 			activity
 				.observed
-				.push_back((message.channel, message.id, mention));
+				.push_back((message.channel, message.id, kind));
 			let counts = activity.observed_counts.entry(message.channel).or_default();
 			counts.0 += 1;
-			counts.1 += u32::from(mention);
+			counts.1 += u32::from(kind > 0);
+			counts.2 += u32::from(kind == 2);
 		}
 		if !allowed {
 			return;
@@ -1715,7 +1775,7 @@ mod tests {
 		assert!(activity.observed_counts.is_empty());
 		assert!(activity.high_water.is_empty());
 		assert!(activity.counts.is_empty());
-		activity.observed.push_back((Id(1), Id(2), true));
+		activity.observed.push_back((Id(1), Id(2), 1));
 		activity.recount(Id(1));
 		assert_eq!(activity.count(Id(1), true), 1);
 		activity.delete(Id(1), Id(2));

@@ -1,7 +1,9 @@
 use crate::{
 	MessagingUi, design,
 	icons::{self, Icon},
-	notifications::{RAIL_TILE, rail_badge, rail_indicator, rail_motion, voice_badge},
+	notifications::{
+		GuildBadge, RAIL_TILE, rail_indicator, rail_motion, rail_ping_badges, voice_badge,
+	},
 };
 use client_core::{Command, State};
 use egui::{Color32, Sense};
@@ -477,19 +479,20 @@ impl MessagingUi {
 								self.guild == Some(id),
 								state.demo,
 							);
-							let (unread, count) = self.rail_cache.guild_badge(id);
+							let badge = self.rail_cache.guild_badge(id);
+							// No white unread pill on servers: only hover and selection show it.
 							rail_indicator(
 								ui,
 								response.id,
 								response.rect,
 								self.guild == Some(id),
 								response.hovered() || response.has_focus(),
-								unread,
+								false,
 							);
 							if call_guild == Some(id) || self.rail_cache.guild_voice(id) {
 								voice_badge(ui, response.rect, call_guild == Some(id));
 							}
-							rail_badge(ui, response.id, response.rect, count, colors.base);
+							rail_ping_badges(ui, response.id, response.rect, badge, colors.base);
 							self.guild_rail_name(&response, state, guild);
 							self.preload.guild(&response, state, id);
 							if response.clicked() {
@@ -550,13 +553,12 @@ impl MessagingUi {
 								ui.set_opacity(opacity);
 							}
 
-							let unread = folder
+							let badge = folder
 								.guild_ids
 								.iter()
-								.any(|g| self.rail_cache.guild_badge(*g).0);
-							let count = folder.guild_ids.iter().fold(0u32, |sum, g| {
-								sum.saturating_add(self.rail_cache.guild_badge(*g).1)
-							});
+								.fold(GuildBadge::default(), |sum, g| {
+									sum.add(self.rail_cache.guild_badge(*g))
+								});
 							// Always tracked so the pill shrinks away when the folder opens.
 							rail_indicator(
 								ui,
@@ -564,7 +566,7 @@ impl MessagingUi {
 								rect,
 								false,
 								!open && (response.hovered() || response.has_focus()),
-								!open && unread,
+								false,
 							);
 							if !open {
 								let own = call_guild.is_some_and(|g| folder.guild_ids.contains(&g));
@@ -577,11 +579,11 @@ impl MessagingUi {
 									voice_badge(ui, rect, own);
 								}
 							}
-							rail_badge(
+							rail_ping_badges(
 								ui,
 								response.id,
 								rect,
-								if open { 0 } else { count },
+								if open { GuildBadge::default() } else { badge },
 								colors.base,
 							);
 							let name = folder.name.as_deref().unwrap_or("Server folder");

@@ -36,6 +36,11 @@ pub enum Event {
 		acked: usize,
 		result: Result<(), Failure>,
 	},
+	/// Direct mentions from the inbox as (channel, message, author).
+	DirectMentions {
+		request: u64,
+		result: Result<Vec<(Id, Id, Id)>, Failure>,
+	},
 }
 impl Event {
 	pub fn bytes(&self) -> usize {
@@ -45,6 +50,9 @@ impl Event {
 					entries.capacity() * size_of::<(Id, Option<Id>, u32)>()
 				}),
 				Self::Latest(entries) => entries.capacity() * size_of::<(Id, Patch<Id>)>(),
+				Self::DirectMentions {
+					result: Ok(list), ..
+				} => list.capacity() * size_of::<(Id, Id, Id)>(),
 				_ => 0,
 			}
 	}
@@ -113,6 +121,9 @@ pub struct ReadState {
 	pending: Option<Pending>,
 	/// A capped or reconnect-interrupted bulk acknowledgement asks for its next batch.
 	continue_all: Option<Scope>,
+	/// Inbox request in flight, and whether this session's inbox was already read.
+	inbox: Option<u64>,
+	inbox_done: bool,
 	pub(crate) status: Option<(Id, &'static str)>,
 }
 impl ReadState {
@@ -642,6 +653,61 @@ impl State {
 			channels: acks,
 		})
 	}
+	/// One inbox read per session once read state is known and some server ping exists, so
+	/// pings counted before this client started can be told apart (direct vs group).
+	pub fn prepare_recent_mentions(&mut self) -> Option<crate::Command> {
+		if self.read_state.inbox_done
+			|| self.read_state.inbox.is_some()
+			|| !self.read_state.known
+			|| self.auth != AuthState::Authenticated
+			|| !self.gateway_connected
+			|| self.demo
+		{
+			return None;
+		}
+		let any_ping = self.channels.iter().any(|channel| {
+			channel.guild.is_some() && self.read_state.activity.has_service_count(channel.id)
+		});
+		if !any_ping {
+			self.read_state.inbox_done = true;
+			return None;
+		}
+		self.read_state.revision = self.read_state.revision.wrapping_add(1);
+		let request = self.read_state.revision;
+		self.read_state.inbox = Some(request);
+		Some(crate::Command::RecentMentions { request })
+	}
+	fn apply_direct_mentions(&mut self, list: &[(Id, Id, Id)]) {
+		let mut direct = BTreeMap::<Id, u32>::new();
+		let mut hidden = BTreeMap::<Id, u32>::new();
+		for (channel, message, author) in list.iter().take(crate::MAX_NAV) {
+			let unread = self
+				.read_marker(*channel)
+				.flatten()
+				.is_none_or(|read| *message > read);
+			if !unread
+				|| self
+					.read_state
+					.activity
+					.observed_message(*channel, *message)
+			{
+				continue;
+			}
+			let bucket = if self.user_hidden(*author) {
+				&mut hidden
+			} else {
+				&mut direct
+			};
+			*bucket.entry(*channel).or_default() += 1;
+		}
+		// Pings from blocked or ignored people leave the service count entirely.
+		for (channel, count) in hidden {
+			self.read_state.activity.discount(channel, count);
+		}
+		for (channel, count) in direct {
+			self.read_state.activity.set_direct_count(channel, count);
+		}
+	}
 	/// Next batch after a capped bulk acknowledgement succeeded or a reconnect interrupted one.
 	pub fn continue_mark_all_read(&mut self) -> Option<crate::Command> {
 		// Kept while another read or a reconnect is in progress.
@@ -963,6 +1029,17 @@ impl State {
 					}
 				}
 			}
+			Event::DirectMentions { request, result } => {
+				if self.read_state.inbox != Some(request) {
+					return Ok(());
+				}
+				self.read_state.inbox = None;
+				// One attempt per session; on failure the pings simply stay red.
+				self.read_state.inbox_done = true;
+				if let Ok(list) = result {
+					self.apply_direct_mentions(&list);
+				}
+			}
 		}
 		Ok(())
 	}
@@ -1098,6 +1175,52 @@ mod navigation_tests {
 		state.drafts.insert(Id(1), "Preserve draft".into());
 		state.reply = Some(Reply::to(Id(500)));
 		state
+	}
+	#[test]
+	fn inbox_splits_counted_pings_into_direct_and_group_once() {
+		let mut state = state(Some(Id(100)));
+		state
+			.apply_read_state(Event::Snapshot {
+				entries: Some(vec![(Id(1), Some(Id(100)), 3)]),
+				version: None,
+				partial: false,
+			})
+			.unwrap();
+		assert_eq!(state.mention_split(Id(1)), (0, 3));
+		state.read_state.inbox = Some(9);
+		let author = Id(7);
+		state
+			.apply_read_state(Event::DirectMentions {
+				request: 9,
+				// The first row is already read; it must not turn a group ping blue.
+				result: Ok(vec![
+					(Id(1), Id(50), author),
+					(Id(1), Id(200), author),
+					(Id(1), Id(300), author),
+				]),
+			})
+			.unwrap();
+		assert_eq!(state.mention_split(Id(1)), (2, 1));
+		// A stale reply or a second session read changes nothing.
+		state
+			.apply_read_state(Event::DirectMentions {
+				request: 9,
+				result: Ok(vec![(Id(1), Id(400), author)]),
+			})
+			.unwrap();
+		assert_eq!(state.mention_split(Id(1)), (2, 1));
+		assert!(state.prepare_recent_mentions().is_none());
+		// Reading the channel clears both colours.
+		state
+			.apply_read_state(Event::Ack {
+				channel: Id(1),
+				message: Some(Id(500)),
+				manual: false,
+				mention_count: Some(0),
+				version: None,
+			})
+			.unwrap();
+		assert_eq!(state.mention_split(Id(1)), (0, 0));
 	}
 	#[test]
 	fn newest_live_cursor_skips_deleted_tail_payloads_and_placeholders() {

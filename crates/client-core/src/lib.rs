@@ -219,6 +219,11 @@ pub enum Command {
 		guild: Id,
 		request: u64,
 	},
+	/// Recent direct `@you` mentions (unofficial inbox endpoint), used once per session to
+	/// split pings that arrived while the client was closed into blue and red.
+	RecentMentions {
+		request: u64,
+	},
 	/// Latest message per unread channel, at most `MAX_BULK_ACK`.
 	MarkAllRead {
 		request: u64,

@@ -4701,6 +4701,9 @@ impl MessagingUi {
 		if let Some(command) = state.continue_mark_all_read() {
 			commands.push(command);
 		}
+		if let Some(command) = state.prepare_recent_mentions() {
+			commands.push(command);
+		}
 		let selected_voice = state
 			.selected
 			.and_then(|id| state.channel(id))

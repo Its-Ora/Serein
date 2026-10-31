@@ -99,7 +99,7 @@ impl State {
 		let visible = self.typing.channel.is_some() && self.typing.channel == self.typing_scope();
 		self.typing.users.iter().filter_map(move |entry| {
 			entry
-				.filter(|(_, deadline)| visible && *deadline > now)
+				.filter(|(user, deadline)| visible && *deadline > now && !self.user_hidden(*user))
 				.map(|(user, _)| user)
 		})
 	}

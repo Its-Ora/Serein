@@ -98,6 +98,23 @@ impl Activity {
 			self.clamp_direct(channel);
 		}
 	}
+	/// A service count exists for this channel (pings counted before this session).
+	pub(crate) fn has_service_count(&self, channel: Id) -> bool {
+		self.counts.get(&channel).is_some_and(|count| *count > 0)
+	}
+	/// Already counted live in this session, so the inbox must not count it again.
+	pub(crate) fn observed_message(&self, channel: Id, message: Id) -> bool {
+		self.observed
+			.iter()
+			.any(|(c, id, _)| *c == channel && *id == message)
+	}
+	/// Removes pings that should not have counted (blocked or ignored authors).
+	pub(crate) fn discount(&mut self, channel: Id, count: u32) {
+		if let Some(total) = self.counts.get_mut(&channel) {
+			*total = total.saturating_sub(count);
+		}
+		self.clamp_direct(channel);
+	}
 	fn clamp_direct(&mut self, channel: Id) {
 		let total = self.counts.get(&channel).copied().unwrap_or(0);
 		if let Some(direct) = self.direct_counts.get_mut(&channel) {

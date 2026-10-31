@@ -1127,6 +1127,12 @@ impl DiscordApi {
 					result,
 				})
 			}
+			Command::RecentMentions { request } => {
+				Event::ReadState(client_core::read_state::Event::DirectMentions {
+					request,
+					result: self.recent_direct_mentions().await,
+				})
+			}
 			Command::MarkAllRead { request, channels } => {
 				let (acked, result) = self.mark_all_read(&channels).await;
 				Event::ReadState(client_core::read_state::Event::AllAck {
@@ -1659,6 +1665,41 @@ impl DiscordApi {
 		}
 		*token = next;
 		Ok(())
+	}
+	/// Unofficial user inbox: recent messages that mention the account directly. Role,
+	/// @everyone and @here mentions are excluded by the query, so every row is a blue ping.
+	async fn recent_direct_mentions(&self) -> Result<Vec<(Id, Id, Id)>, Failure> {
+		#[derive(serde::Deserialize)]
+		struct Author {
+			id: String,
+		}
+		#[derive(serde::Deserialize)]
+		struct Row {
+			id: String,
+			channel_id: String,
+			author: Author,
+		}
+		let bytes = self
+			.request_limited(
+				Method::GET,
+				"/users/@me/mentions?limit=50&roles=false&everyone=false",
+				None,
+				4 * 1024 * 1024,
+			)
+			.await?;
+		let rows: Vec<Row> = serde_json::from_slice(&bytes).map_err(|_| Failure::Protocol)?;
+		if rows.len() > 100 {
+			return Err(Failure::Protocol);
+		}
+		rows.into_iter()
+			.map(|row| {
+				Ok((
+					row.channel_id.parse().map_err(|_| Failure::Protocol)?,
+					row.id.parse().map_err(|_| Failure::Protocol)?,
+					row.author.id.parse().map_err(|_| Failure::Protocol)?,
+				))
+			})
+			.collect()
 	}
 	async fn mark_guild_read(&self, guild: model::Id) -> Result<(), Failure> {
 		self.request_limited(Method::POST, &format!("/guilds/{guild}/ack"), None, 4096)

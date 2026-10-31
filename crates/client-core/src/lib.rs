@@ -11,6 +11,7 @@ pub mod gifs;
 pub mod guild_creation;
 pub mod guild_folders;
 pub mod permissions;
+pub mod session_log;
 pub mod stickers;
 pub use permissions::ChannelAccess;
 #[cfg(test)]

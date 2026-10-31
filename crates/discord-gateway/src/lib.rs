@@ -155,6 +155,14 @@ impl ResumeState {
 	fn close(&mut self, code: u16) -> Result<(), Failure> {
 		match close_action(code) {
 			Reconnect::Stop => {
+				client_core::session_log::record(&format!(
+					"Gateway closed with code {code} -> {}",
+					if code == 4004 {
+						"token refused (session ended)"
+					} else {
+						"connection stopped"
+					}
+				));
 				return Err(if code == 4004 {
 					Failure::Expired
 				} else {

@@ -68,6 +68,26 @@ const API_ORIGINS: [&str; 2] = [
 ];
 static API_ON_TEST_HOST: AtomicBool = AtomicBool::new(false);
 
+/// Outcome of re-checking the token after a 401.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TokenCheck {
+	/// `/users/@me` also refused it: the session really ended.
+	Revoked,
+	/// `/users/@me` accepted it: the 401 was specific to one route.
+	Valid,
+	/// The check itself could not complete (network, rate limit): keep the session.
+	Unknown,
+}
+impl TokenCheck {
+	fn label(self) -> &'static str {
+		match self {
+			Self::Revoked => "REVOKED (session ended)",
+			Self::Valid => "still valid (session kept)",
+			Self::Unknown => "inconclusive (session kept)",
+		}
+	}
+}
+
 /// Later lookups in this process follow a Cloudflare block of discord.com.
 pub fn api_v10_base() -> &'static str {
 	API_ORIGINS[usize::from(API_ON_TEST_HOST.load(Ordering::Acquire))]
@@ -286,6 +306,28 @@ impl DiscordApi {
 	pub fn stop(&self) {
 		self.stopped.store(true, Ordering::Release);
 	}
+	/// Direct `/users/@me` read with the same token, outside the request loop so it can
+	/// never recurse into another 401 check.
+	async fn check_token(&self) -> TokenCheck {
+		let Ok(mut authorization) = HeaderValue::from_str(self.secret.expose()) else {
+			return TokenCheck::Revoked;
+		};
+		authorization.set_sensitive(true);
+		let (base, _) = self.api_origin();
+		let Ok(client) = self.rest_client().await else {
+			return TokenCheck::Unknown;
+		};
+		match client
+			.get(format!("{base}/users/@me"))
+			.header(AUTHORIZATION, authorization)
+			.send()
+			.await
+		{
+			Ok(response) if response.status() == StatusCode::UNAUTHORIZED => TokenCheck::Revoked,
+			Ok(response) if response.status().is_success() => TokenCheck::Valid,
+			_ => TokenCheck::Unknown,
+		}
+	}
 	pub fn stopped(&self) -> bool {
 		self.stopped.load(Ordering::Acquire)
 	}
@@ -491,8 +533,34 @@ impl DiscordApi {
 				*next = (*next).max(Instant::now() + safe_delay(reset)?);
 			}
 			if status == StatusCode::UNAUTHORIZED {
-				self.stop();
-				return Err(Failure::Expired);
+				// One refused endpoint does not prove the token is dead: Discord also answers
+				// 401 on some routes for other reasons. Only a refused `/users/@me` (or Gateway
+				// close 4004) ends the session; otherwise just this request fails.
+				let route = client_core::session_log::redact_path(path);
+				let verdict = if path.starts_with("/users/@me") && !path.starts_with("/users/@me/")
+				{
+					TokenCheck::Revoked
+				} else {
+					drop(response);
+					self.check_token().await
+				};
+				client_core::session_log::record(&format!(
+					"HTTP 401 on {} {route} -> token check: {}",
+					method.as_str(),
+					verdict.label()
+				));
+				return match verdict {
+					TokenCheck::Revoked => {
+						self.stop();
+						Err(Failure::Expired)
+					}
+					TokenCheck::Valid => Err(Failure::Forbidden),
+					TokenCheck::Unknown => Err(if write {
+						Failure::Ambiguous
+					} else {
+						Failure::Network
+					}),
+				};
 			}
 			let cloudflare_block = response
 				.headers()
@@ -3089,7 +3157,9 @@ mod tests {
 	#[tokio::test]
 	async fn optional_badge_capacity_preserves_profiles_but_expiry_ends_session() {
 		tokio::time::timeout(Duration::from_secs(5), async {
-			for case in 0..3 {
+			// Case 2: the route 401s and `/users/@me` 401s too, so the session ends.
+			// Case 3: the route 401s but `/users/@me` accepts the token, so only that read fails.
+			for case in 0..4 {
 				let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
 				let mut api = DiscordApi::new(Arc::new(
 					SessionSecret::from_owner_input("SYNTHETIC_BADGE_TOKEN".into()).unwrap(),
@@ -3116,6 +3186,18 @@ mod tests {
 						// The reader may close the socket as soon as the streaming bound is hit.
 						let _ = stream.write_all(&vec![b' '; discord_protocol::badges::MAX_CATALOG_WIRE + 1]).await;
 					}
+					if case >= 2 {
+						drop(stream);
+						let (mut stream, _) = listener.accept().await.unwrap();
+						let n = stream.read(&mut buffer).await.unwrap();
+						assert!(std::str::from_utf8(&buffer[..n]).unwrap().starts_with("GET /users/@me HTTP/1.1"));
+						let reply = if case == 2 {
+							"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+						} else {
+							"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
+						};
+						stream.write_all(reply.as_bytes()).await.unwrap();
+					}
 				});
 				let event = api.execute(Command::Profile {
 					user: model::Id(5),
@@ -3127,6 +3209,13 @@ mod tests {
 				if case == 2 {
 					assert!(matches!(event, Event::Profile { result: Err(Failure::Expired), .. }));
 					assert!(api.stopped());
+				} else if case == 3 {
+					// The profile itself loaded; only the optional catalog read was refused.
+					let Event::Profile { result: Ok(profile), .. } = event else {
+						panic!("a route-specific 401 must not end the session");
+					};
+					assert!(profile.badge_catalog.is_none());
+					assert!(!api.stopped());
 				} else {
 					let Event::Profile { result: Ok(profile), .. } = event else {
 						panic!("oversized optional catalog must preserve the profile");

@@ -74,6 +74,10 @@ use zeroize::Zeroizing;
 /// Run explicit offline checks before native startup, or launch the configured desktop client.
 fn main() -> eframe::Result {
 	platform::memory::tune_allocator();
+	// Fork: why sessions end, so silent logouts can be explained (%LOCALAPPDATA%\serein).
+	if let Ok(dir) = local_store::data_dir() {
+		client_core::session_log::set_path(dir.join("session.log"));
+	}
 	#[cfg(all(debug_assertions, feature = "demo"))]
 	if std::env::args().any(|arg| arg == "--demo")
 		&& std::env::args().any(|arg| arg == "--demo-check-pr565")
@@ -1061,6 +1065,11 @@ struct Desktop {
 	presence_saved: Option<(model::Id, model::OwnPresence)>,
 	/// Saved account awaiting the owner's confirmation before it is forgotten.
 	confirming_forget: Option<model::Id>,
+	/// Fork: when to retry the saved login after Discord refused the session.
+	relogin_at: Option<std::time::Instant>,
+	/// Automatic retries since the last successful READY; the saved login is forgotten
+	/// only after these are used up.
+	relogin_attempts: u8,
 	credential_status: &'static str,
 	/// Until when the sign-in failure copy button reads "Copied".
 	sign_in_copied: Option<f64>,
@@ -2392,6 +2401,8 @@ impl Desktop {
 			presence_authoritative: false,
 			presence_saved: None,
 			confirming_forget: sign_in_forget,
+			relogin_at: None,
+			relogin_attempts: 0,
 			sign_in_copied: None,
 			credential_status: if demo {
 				"Fixture mode skips saved login; extensions use public GitHub downloads"
@@ -4989,6 +5000,14 @@ impl Desktop {
 				self.queue_cache(cache::Operation::SaveDraft { channel, content });
 			}
 			if ready && self.state.auth == AuthState::Authenticated {
+				if self.relogin_attempts > 0 {
+					client_core::session_log::record(&format!(
+						"Reconnected with the saved login after {} automatic attempt(s)",
+						self.relogin_attempts
+					));
+				}
+				self.relogin_attempts = 0;
+				self.relogin_at = None;
 				// The worker survives logout; each accepted account READY restores its own drafts.
 				if !self.messaging.draft_restore_pending {
 					self.messaging.draft_restore_pending =
@@ -5097,6 +5116,7 @@ impl Desktop {
 					);
 				}
 			}
+			client_core::session_log::record(&format!("Session stopped: {}", failure.label()));
 			self.state.interrupt_gif_favorites();
 			self.connection = None;
 			self.pending_save = None;
@@ -5124,11 +5144,34 @@ impl Desktop {
 			if failure == Failure::Expired
 				&& let Some(store) = &self.store
 			{
-				let _ = store.send.try_send((
-					self.state.generation,
-					credentials::Request::NONE,
-					credentials::Operation::Forget,
-				));
+				// Fork: keep the saved login and retry it a few times before giving up, so a
+				// brief refusal does not cost a full password + 2FA sign-in.
+				const DELAYS: [u64; 3] = [30, 120, 300];
+				if let Some(delay) = DELAYS.get(usize::from(self.relogin_attempts)) {
+					self.relogin_attempts += 1;
+					self.relogin_at =
+						Some(std::time::Instant::now() + std::time::Duration::from_secs(*delay));
+					self.state.status = match delay {
+						30 => "Discord a refusé la session · reconnexion auto dans 30 s",
+						120 => "Discord a refusé la session · reconnexion auto dans 2 min",
+						_ => "Discord a refusé la session · dernière tentative auto dans 5 min",
+					};
+					client_core::session_log::record(&format!(
+						"Saved login kept; automatic retry {} in {delay}s",
+						self.relogin_attempts
+					));
+				} else {
+					self.relogin_attempts = 0;
+					self.relogin_at = None;
+					client_core::session_log::record(
+						"Saved login refused after every automatic retry; forgotten, sign in again",
+					);
+					let _ = store.send.try_send((
+						self.state.generation,
+						credentials::Request::NONE,
+						credentials::Operation::Forget,
+					));
+				}
 			}
 		}
 		if let Some(login) = &self.login {
@@ -6365,7 +6408,25 @@ impl eframe::App for Desktop {
 			if let Some(at) = self.messaging.avatar_release_at() {
 				ctx.request_repaint_after(at.saturating_duration_since(std::time::Instant::now()));
 			}
+			if let Some(at) = self.relogin_at {
+				let now = std::time::Instant::now();
+				if now >= at {
+					self.relogin_at = None;
+					if self.state.auth != AuthState::Authenticated
+						&& self.login.is_none()
+						&& self.connection.is_none()
+						&& let Some(store) = &mut self.store
+						&& store.load(self.state.generation, now)
+					{
+						self.state.status = "Reconnexion avec la session sauvegardée…";
+					}
+				} else {
+					ctx.request_repaint_after(at - now);
+				}
+			}
 			if std::mem::take(&mut self.messaging.reconnect_requested) {
+				// A manual sign-in replaces any pending automatic retry.
+				self.relogin_at = None;
 				if self.state.auth == AuthState::Authenticated {
 					if let Some(connection) = &self.connection {
 						connection.reconnect();

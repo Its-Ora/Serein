@@ -480,6 +480,13 @@ Fork perso de Serein. Tout ce qui suit est côté client, rien n'est envoyé à 
 - Tu apparais **en ligne** pour tout le monde, mais tout est coupé chez toi : **notifs Windows, sons, badges de ping (serveurs, MP, demandes d'amis) et compteur de la barre des tâches**.
 - Choisir n'importe quel autre statut désactive le mode. Il est gardé après un redémarrage.
 
+### Déconnexions intempestives
+- Avant, **un seul** refus 401 sur n'importe quelle requête faisait tout couper **et supprimait le token sauvegardé** → relogin complet (mot de passe + 2FA).
+- Maintenant, sur un 401, Serein revérifie le token avec `/users/@me` :
+  - token encore valide → seule la requête fautive échoue, **la session continue** ;
+  - token vraiment refusé (ou Gateway fermée en 4004) → la session s'arrête, mais **le token sauvegardé est gardé** et Serein retente seul après **30 s, 2 min puis 5 min**. Le token n'est oublié qu'après ces 3 échecs.
+- **Journal** : `%LOCALAPPDATA%\serein\session.log` note chaque fin de session, chaque 401 (route sans aucun ID, résultat de la revérification) et chaque reconnexion auto. Aucun token, message ou ID n'y est écrit. Taille limitée à 64 Ko.
+
 ### Mises à jour
 - La mise à jour automatique de Serein est **désactivée** dans ce fork : elle installerait la version officielle et effacerait ces changements. Le journal des nouveautés reste consultable.
 - Pour récupérer un build : onglet **Actions** du fork → workflow **Ora Windows build** → dernier run → **Artifacts** → `serein-ora-windows` (installeur `serein-ora-setup.exe` ou zip portable).

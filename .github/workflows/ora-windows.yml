@@ -1,15 +1,15 @@
 name: Ora Windows build
-# Builds the custom client (fork changes) for Windows on every push to the fork branch,
-# or on demand from the Actions tab. Download the zip from the run's "Artifacts".
+# Builds the fork for Windows on every push to main (or on demand) and publishes it as a
+# GitHub Release, so the newest build is always the "Latest" release.
 on:
   push:
-    branches: [ora/custom-client, main]
+    branches: [main]
   workflow_dispatch:
 concurrency:
   group: ora-windows-${{ github.ref }}
   cancel-in-progress: true
 permissions:
-  contents: read
+  contents: write
 jobs:
   windows:
     runs-on: windows-latest
@@ -43,3 +43,22 @@ jobs:
           path: release-assets/*
           if-no-files-found: error
           retention-days: 30
+      - name: Publish release
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="ora-${GITHUB_RUN_NUMBER}"
+          subject="$(git log -1 --format=%s)"
+          notes="Build automatique de \`${GITHUB_SHA::7}\` : ${subject}
+
+          - **serein-ora-setup.exe** : installeur (garde ton login et tes réglages).
+          - **serein-ora-windows-portable.zip** : version sans installation.
+
+          Changements du fork : voir le README."
+          gh release create "$tag" release-assets/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Serein Ora #${GITHUB_RUN_NUMBER}" \
+            --notes "$notes" \
+            --latest

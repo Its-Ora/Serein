@@ -1,0 +1,45 @@
+name: Ora Windows build
+# Builds the custom client (fork changes) for Windows on every push to the fork branch,
+# or on demand from the Actions tab. Download the zip from the run's "Artifacts".
+on:
+  push:
+    branches: [ora/custom-client, main]
+  workflow_dispatch:
+concurrency:
+  group: ora-windows-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt, clippy
+      - name: Install NSIS
+        run: choco install nsis --no-progress -y
+      - name: Package app
+        run: cargo xtask package
+      - name: Archive
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release-assets | Out-Null
+          Compress-Archive -Path "dist/*" -DestinationPath "release-assets/serein-ora-windows-portable.zip"
+          $installer = Get-ChildItem -Path "dist-installer/*-setup.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($installer) {
+            Copy-Item -LiteralPath $installer.FullName -Destination "release-assets/serein-ora-setup.exe"
+          }
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: serein-ora-windows
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 30

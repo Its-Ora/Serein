@@ -732,7 +732,10 @@ async fn check_release(
 	let current = semver::Version::parse(env!("CARGO_PKG_VERSION"))
 		.map_err(|_| "This build has an invalid version.".to_owned())?;
 	let log = release_log(&releases, nightly, &current);
-	select_release(releases, nightly, &current).map(|package| (package, log))
+	// Custom fork build: upstream packages would replace the fork's features, so the
+	// changelog stays visible but nothing is ever offered for install.
+	let _ = select_release(releases, nightly, &current)?;
+	Ok((None, log))
 }
 fn demo_log() -> Vec<ui::updates::LogEntry> {
 	[

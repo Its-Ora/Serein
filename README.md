@@ -447,3 +447,39 @@ Demo fixtures and simulated actions are excluded from normal app and CI packages
 Build with `--features demo` and launch with `--demo` to enable them; `--demo-*`
 scenario flags additionally require `--demo`. `cargo xtask package` always builds
 without demo support, while offline tests can still use synthetic fixtures.
+
+---
+
+## Changements de ce fork (Its-Ora)
+
+Fork perso de Serein. Tout ce qui suit est côté client, rien n'est envoyé à Discord à part les actions normales (marquer comme lu).
+
+### Barre des serveurs
+- **Bouton « Tout lire »** juste sous le logo, au-dessus des serveurs. Un clic marque comme lus **tous les serveurs** en une seule requête groupée (la même que le client officiel). Les MP gardent leur état. Grisé quand il n'y a rien à lire.
+- **Plus de pastille blanche** de non-lu à gauche des serveurs et des dossiers. La barre reste visible au survol et sur le serveur sélectionné.
+- **Pings en couleur** :
+  - **bleu** = mention directe `@toi` ;
+  - **rouge** = mention de rôle, `@everyone` ou `@here` ;
+  - les deux en même temps → les deux badges côte à côte, chacun avec son nombre.
+  - Les pings reçus pendant que Serein était fermé sont classés au démarrage via la boîte « mentions récentes » de Discord (endpoint non officiel, une seule requête par session, les 50 dernières mentions directes). Si cette requête échoue, ces anciens pings restent en rouge.
+
+### Groupes d'amis
+- Onglets **En ligne** et **Tous** : bouton **« + Nouveau groupe »**.
+- Menu **⋯** d'un ami → **Déplacer vers le groupe** / **Retirer du groupe**.
+- Clic sur un groupe pour le replier, clic droit pour le renommer, le monter/descendre ou le supprimer (les amis reviennent dans « Sans groupe », personne n'est retiré de Discord).
+- Stocké uniquement sur ce PC (max 16 groupes, 250 amis rangés).
+
+### Bloqués et ignorés invisibles
+- Leurs **messages n'apparaissent plus du tout** (pas de « message bloqué » repliable).
+- Absents de la **liste des membres** d'un serveur.
+- Leurs **pings ne comptent jamais** (ni badge, ni notif, ni son) et leurs « est en train d'écrire » sont masqués.
+- En **vocal** : une ligne anonyme « Une personne bloquée dans ce vocal », sans nom, sans avatar, sans menu. Elle est **mutée pour toi automatiquement**, sans possibilité de la démuter. En appel, sa tuile est vide (pas de caméra).
+
+### Mode « En ligne · silencieux »
+- Dans le menu de statut, sous « En ligne ».
+- Tu apparais **en ligne** pour tout le monde, mais tout est coupé chez toi : **notifs Windows, sons, badges de ping (serveurs, MP, demandes d'amis) et compteur de la barre des tâches**.
+- Choisir n'importe quel autre statut désactive le mode. Il est gardé après un redémarrage.
+
+### Mises à jour
+- La mise à jour automatique de Serein est **désactivée** dans ce fork : elle installerait la version officielle et effacerait ces changements. Le journal des nouveautés reste consultable.
+- Pour récupérer un build : onglet **Actions** du fork → workflow **Ora Windows build** → dernier run → **Artifacts** → `serein-ora-windows` (installeur `serein-ora-setup.exe` ou zip portable).

@@ -139,13 +139,19 @@ impl MessagingUi {
 			.as_deref()
 			.copied()
 			.unwrap_or([(0, 100); 64]);
-		for user in self.voice_user_muted.iter().copied() {
+		// Forced mutes come first so a full slot table never drops a blocked speaker.
+		for user in self
+			.voice_forced_mutes
+			.iter()
+			.chain(self.voice_user_muted.iter())
+			.copied()
+		{
 			if let Some(slot) = values.iter_mut().find(|(id, _)| *id == user) {
 				slot.1 = 0;
 			} else if let Some(index) = values.iter().position(|(id, _)| *id == 0).or_else(|| {
-				values
-					.iter()
-					.rposition(|(id, _)| !self.voice_user_muted.contains(id))
+				values.iter().rposition(|(id, _)| {
+					!self.voice_user_muted.contains(id) && !self.voice_forced_mutes.contains(id)
+				})
 			}) {
 				values[index] = (user, 0);
 			}
@@ -169,7 +175,20 @@ impl MessagingUi {
 	}
 
 	pub(super) fn voice_user_locally_muted(&self, user: Id) -> bool {
-		self.voice_user_muted.contains(&user.0)
+		self.voice_user_muted.contains(&user.0) || self.voice_forced_mutes.contains(&user.0)
+	}
+	/// Blocked and ignored people present in voice: mixed at zero gain, no way to unmute.
+	pub(super) fn sync_forced_voice_mutes(&mut self, state: &State) {
+		self.voice_forced_mutes.clear();
+		for entry in &state.voice.roster {
+			let user = entry.participant.user;
+			if state.user_hidden(user)
+				&& !self.voice_forced_mutes.contains(&user.0)
+				&& self.voice_forced_mutes.len() < MAX_USER_MUTES
+			{
+				self.voice_forced_mutes.push(user.0);
+			}
+		}
 	}
 
 	pub(super) fn set_voice_user_locally_muted(&mut self, user: Id, muted: bool) {
@@ -568,6 +587,10 @@ impl MessagingUi {
 		entry: &RosterEntry,
 	) {
 		if !state.can_view(entry.channel) {
+			return;
+		}
+		if state.user_hidden(entry.participant.user) {
+			hidden_voice_row(ui, entry);
 			return;
 		}
 		let colors = design::palette(ui);
@@ -1600,6 +1623,10 @@ impl MessagingUi {
 		frameless: bool,
 		compact: bool,
 	) {
+		if state.user_hidden(entry.participant.user) {
+			hidden_voice_tile(ui, rect, frameless);
+			return;
+		}
 		let size = rect.size();
 		let (user, name) = resolve_member(state, entry);
 		let colors = design::palette(ui);
@@ -4821,6 +4848,65 @@ fn device_combo(
 		.response
 		.on_hover_text(&label)
 }
+
+/// Anonymous stand-in for a blocked or ignored person in a voice channel list: no name,
+/// no avatar, no menu, always muted for you.
+fn hidden_voice_row(ui: &mut egui::Ui, entry: &RosterEntry) {
+	let colors = design::palette(ui);
+	ui.push_id(
+		("voice-hidden", entry.channel, entry.participant.user),
+		|ui| {
+			let (rect, row) = ui
+				.allocate_exact_size(egui::vec2(ui.available_width(), 34.0), egui::Sense::hover());
+			row.widget_info(|| {
+				egui::WidgetInfo::labeled(egui::Role::Label, true, HIDDEN_VOICE_LABEL)
+			});
+			let avatar = egui::Rect::from_center_size(
+				egui::pos2(rect.left() + 14.0, rect.center().y),
+				egui::Vec2::splat(28.0),
+			);
+			ui.painter()
+				.circle_filled(avatar.center(), 14.0, colors.raised);
+			crate::icons::paint(
+				ui.painter(),
+				crate::icons::Icon::ShieldWarning,
+				avatar.shrink(7.0),
+				colors.muted,
+			);
+			ui.painter().text(
+				egui::pos2(rect.left() + 34.0, rect.center().y),
+				egui::Align2::LEFT_CENTER,
+				HIDDEN_VOICE_LABEL,
+				egui::FontId::proportional(13.0),
+				colors.muted,
+			);
+			crate::icons::paint(
+				ui.painter(),
+				crate::icons::Icon::Speaker,
+				egui::Rect::from_center_size(
+					egui::pos2(rect.right() - 12.0, rect.center().y),
+					egui::Vec2::splat(14.0),
+				),
+				colors.danger,
+			);
+		},
+	);
+}
+/// Call-grid tile for a blocked or ignored person: blank, labelled, never their video.
+fn hidden_voice_tile(ui: &mut egui::Ui, rect: egui::Rect, frameless: bool) {
+	let colors = design::palette(ui);
+	if !frameless {
+		ui.painter().rect_filled(rect, 8, TILE_FILL);
+	}
+	ui.painter().text(
+		rect.center(),
+		egui::Align2::CENTER_CENTER,
+		HIDDEN_VOICE_LABEL,
+		egui::FontId::proportional(13.0),
+		colors.muted,
+	);
+}
+const HIDDEN_VOICE_LABEL: &str = "Une personne bloquée dans ce vocal";
 
 #[cfg(test)]
 mod tests {

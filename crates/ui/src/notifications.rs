@@ -386,6 +386,7 @@ impl MessagingUi {
 		let colors = design::palette(ui);
 		let mut selected = None;
 		self.rail_cache.sync(state);
+		self.sync_forced_voice_mutes(state);
 		egui::Panel::left("guilds")
 			.resizable(false)
 			.exact_size(RAIL_WIDTH)
@@ -432,7 +433,11 @@ impl MessagingUi {
 				);
 				rail_indicator(ui, response.id, rect, home, hovered, false);
 				let (friends, messages) = state.home_request_parts();
-				let requests = friends.saturating_add(messages);
+				let requests = if self.quiet_online {
+					0
+				} else {
+					friends.saturating_add(messages)
+				};
 				rail_badge(
 					ui,
 					response.id,
@@ -503,7 +508,8 @@ impl MessagingUi {
 							let unread = state.channel_unread(channel) == Some(true) || count > 0;
 							// Keyed by channel: auto ids shift as unread conversations come and go.
 							let id = ui.scope_id().with(("rail-direct", channel.id));
-							indicator(ui, id, &response, unread, count);
+							let shown = if self.quiet_online { 0 } else { count };
+							indicator(ui, id, &response, unread, shown);
 							if in_call {
 								call_badge(ui, response.rect);
 							}

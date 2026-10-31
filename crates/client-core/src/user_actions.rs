@@ -748,6 +748,11 @@ impl State {
 			.copied()
 			.or_else(|| (self.demo || self.user_actions.known).then_some(false))
 	}
+	/// Blocked or ignored: such people are erased from messages, member lists, pings and
+	/// voice rosters on this client.
+	pub fn user_hidden(&self, user: Id) -> bool {
+		self.user_blocked(user) == Some(true) || self.user_ignored(user) == Some(true)
+	}
 	/// Whether the user is ignored, including an optimistic pending toggle; `None` while unknown.
 	pub fn user_ignored(&self, user: Id) -> Option<bool> {
 		if let Some((

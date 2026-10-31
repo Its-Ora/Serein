@@ -65,7 +65,9 @@ impl Runtime {
 		fixture: bool,
 	) -> Option<Alert> {
 		let live = !fixture && !state.demo && state.auth == AuthState::Authenticated;
-		let audible = live && ui.own_presence.status != PresenceStatus::DoNotDisturb;
+		// "Online, quiet" silences alerts exactly like DND while still showing as online.
+		let audible =
+			live && ui.own_presence.status != PresenceStatus::DoNotDisturb && !ui.quiet_online;
 		let options = ui.notification_options;
 		let badges = platform::badge::supported() && options.unread_badge;
 		if options != self.options || (self.was_audible && !audible) {
@@ -133,7 +135,7 @@ impl Runtime {
 		let since = self.badge_check.map(|time| time.elapsed());
 		if since.is_none_or(|since| since >= Duration::from_secs(1)) || !badges || !live {
 			self.badge_check = Some(Instant::now());
-			let pings = if live && badges {
+			let pings = if live && badges && !ui.quiet_online {
 				badge_count(state)
 			} else {
 				0

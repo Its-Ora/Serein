@@ -560,12 +560,11 @@ impl MessagingUi {
 	fn account_status_row(&mut self, ui: &mut egui::Ui) {
 		let colors = design::palette(ui);
 		let status = self.own_presence.status;
-		let label = design::medium(
-			ui,
-			crate::i18n::translate_if_key(presence_status_key(status)),
-			14.0,
-		)
-		.color(colors.text_strong);
+		let mut name = crate::i18n::translate_if_key(presence_status_key(status));
+		if self.quiet_online && status == PresenceStatus::Online {
+			name.push_str(" · silencieux");
+		}
+		let label = design::medium(ui, name, 14.0).color(colors.text_strong);
 		let response = ui
 			.scope(|ui| {
 				let width = ui.available_width();
@@ -605,6 +604,62 @@ impl MessagingUi {
 		);
 	}
 
+	/// Shows as Online to everyone, but every local alert is off: no desktop notification,
+	/// no sound, no ping badge, no taskbar count. Purely device-side.
+	fn quiet_online_item(&mut self, ui: &mut egui::Ui) {
+		let colors = design::palette(ui);
+		let response = ui.add_sized(
+			[ui.available_width(), 62.0],
+			egui::Button::selectable(self.quiet_online, "")
+				.frame_when_inactive(false)
+				.corner_radius(6),
+		);
+		response.widget_info(|| {
+			egui::WidgetInfo::selected(
+				egui::Role::Button,
+				true,
+				self.quiet_online,
+				"En ligne, silencieux",
+			)
+		});
+		let background = if response.hovered() || response.has_focus() {
+			ui.visuals().widgets.hovered.weak_bg_fill
+		} else {
+			ui.visuals().window_fill
+		};
+		presence_dot(
+			ui.painter(),
+			egui::pos2(response.rect.left() + 17.0, response.rect.center().y),
+			5.0,
+			PresenceStatus::Online,
+			background,
+		);
+		let x = response.rect.left() + 34.0;
+		let y = response.rect.top() + 10.0;
+		ui.painter().text(
+			egui::pos2(x, y),
+			egui::Align2::LEFT_TOP,
+			"En ligne · silencieux",
+			egui::FontId::new(14.0, design::medium_family(ui.ctx())),
+			colors.text_strong,
+		);
+		let galley = ui.painter().layout(
+			"Visible en ligne, mais aucune notif, aucun son et aucun badge.".to_owned(),
+			egui::FontId::proportional(12.0),
+			colors.muted,
+			(response.rect.width() - 46.0).max(80.0),
+		);
+		ui.painter()
+			.galley(egui::pos2(x, y + 22.0), galley, colors.muted);
+		if response.clicked() {
+			if self.own_presence.status != PresenceStatus::Online {
+				self.own_presence.status = PresenceStatus::Online;
+				self.own_presence_changed = true;
+			}
+			self.quiet_online = true;
+			ui.close();
+		}
+	}
 	fn presence_menu(&mut self, ui: &mut egui::Ui) {
 		let colors = design::palette(ui);
 		ui.set_width(260.0_f32.min(ui.ctx().content_rect().width() - 48.0));
@@ -661,9 +716,11 @@ impl MessagingUi {
 					self.own_presence.status = status;
 					self.own_presence_changed = true;
 				}
+				self.quiet_online = false;
 				ui.close();
 			}
 			if status == PresenceStatus::Online {
+				self.quiet_online_item(ui);
 				ui.separator();
 			}
 		}

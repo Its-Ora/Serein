@@ -347,6 +347,8 @@ pub struct MessagingUi {
 	pub time_format: model::TimeFormat,
 	/// Saved logins may fall back to plain files when no OS keyring works.
 	pub plaintext_login: bool,
+	/// Blocked or ignored voice participants, muted for you with no unmute.
+	voice_forced_mutes: Vec<u64>,
 	/// Online without alerts: desktop notifications, sounds and ping badges are all off.
 	pub quiet_online: bool,
 	/// Device-local friend groups shown in the Online and All friends tabs.
@@ -1681,6 +1683,9 @@ impl MessagingUi {
 								)
 								.on_hover_text(&text);
 						}
+						// Blocked and ignored people take no space in the member list.
+						Some(model::MemberSlot::Person(member))
+							if state.user_hidden(member.user.id) => {}
 						Some(model::MemberSlot::Person(member)) => {
 							let name = member
 								.nick

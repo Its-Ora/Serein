@@ -1014,7 +1014,12 @@ fn display_rows<'a>(state: &'a State) -> impl Iterator<Item = &'a Message> + 'a 
 		.filter(|message| Some(message.channel) == state.selected)
 		.collect();
 	private.sort_by_key(|message| message.id);
-	let mut shared = state.timeline.display_iter().peekable();
+	// Blocked and ignored people are erased from the conversation, not collapsed.
+	let mut shared = state
+		.timeline
+		.display_iter()
+		.filter(|message| !state.user_hidden(message.author.id))
+		.peekable();
 	let mut private = private.into_iter().peekable();
 	std::iter::from_fn(move || match (shared.peek(), private.peek()) {
 		(Some(shared_next), Some(private_next)) if private_next.id < shared_next.id => {

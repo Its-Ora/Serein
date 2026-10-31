@@ -971,6 +971,10 @@ impl State {
 		{
 			return;
 		}
+		// Blocked and ignored people never count: no unread, no ping, no alert.
+		if self.user_hidden(message.author.id) {
+			return;
+		}
 		let direct = message.mentions.iter().any(|u| u.id == owner.id);
 		let guild_channel = self
 			.channel(message.channel)

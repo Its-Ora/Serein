@@ -479,7 +479,11 @@ impl MessagingUi {
 								self.guild == Some(id),
 								state.demo,
 							);
-							let badge = self.rail_cache.guild_badge(id);
+							let badge = if self.quiet_online {
+								GuildBadge::default()
+							} else {
+								self.rail_cache.guild_badge(id)
+							};
 							// No white unread pill on servers: only hover and selection show it.
 							rail_indicator(
 								ui,
@@ -553,12 +557,16 @@ impl MessagingUi {
 								ui.set_opacity(opacity);
 							}
 
-							let badge = folder
-								.guild_ids
-								.iter()
-								.fold(GuildBadge::default(), |sum, g| {
-									sum.add(self.rail_cache.guild_badge(*g))
-								});
+							let badge = if self.quiet_online {
+								GuildBadge::default()
+							} else {
+								folder
+									.guild_ids
+									.iter()
+									.fold(GuildBadge::default(), |sum, g| {
+										sum.add(self.rail_cache.guild_badge(*g))
+									})
+							};
 							// Always tracked so the pill shrinks away when the folder opens.
 							rail_indicator(
 								ui,

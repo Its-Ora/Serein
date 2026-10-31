@@ -17,6 +17,10 @@ pub(super) struct Friends {
 	list_key: Option<ListKey>,
 	list_query: String,
 	list: Box<[model::Id]>,
+	/// Name typed for a new friend group, while the field is open.
+	new_group: Option<String>,
+	/// Group being renamed and its draft name.
+	rename: Option<(usize, String)>,
 	#[cfg(feature = "demo")]
 	focus_search: bool,
 }
@@ -27,6 +31,182 @@ struct ListKey {
 	online: Option<(bool, u64)>,
 	tab: Tab,
 }
+/// A displayed friends-list row: a group heading or one friend.
+#[derive(Clone, Copy)]
+enum Row {
+	/// `None` is the trailing "no group" heading.
+	Header {
+		group: Option<usize>,
+		count: usize,
+		collapsed: bool,
+	},
+	Friend(model::Id),
+}
+/// Groups first in their saved order, then everyone without a group. Collapsed groups
+/// keep their heading and hide their friends. Without groups the list stays flat.
+fn grouped_rows(list: &[model::Id], groups: &[model::FriendGroup]) -> Vec<Row> {
+	if groups.is_empty() {
+		return list.iter().copied().map(Row::Friend).collect();
+	}
+	let mut rows = Vec::with_capacity(list.len() + groups.len() + 1);
+	for (index, group) in groups.iter().enumerate() {
+		let members: Vec<model::Id> = list
+			.iter()
+			.copied()
+			.filter(|id| group.members.contains(&id.0))
+			.collect();
+		rows.push(Row::Header {
+			group: Some(index),
+			count: members.len(),
+			collapsed: group.collapsed,
+		});
+		if !group.collapsed {
+			rows.extend(members.into_iter().map(Row::Friend));
+		}
+	}
+	let loose: Vec<model::Id> = list
+		.iter()
+		.copied()
+		.filter(|id| model::friend_group_of(groups, id.0).is_none())
+		.collect();
+	if !loose.is_empty() {
+		rows.push(Row::Header {
+			group: None,
+			count: loose.len(),
+			collapsed: false,
+		});
+		rows.extend(loose.into_iter().map(Row::Friend));
+	}
+	rows
+}
+/// Group heading row: chevron, name and count; click folds it, right-click edits it.
+fn group_header(
+	ui: &mut egui::Ui,
+	groups: &mut Vec<model::FriendGroup>,
+	rename: &mut Option<(usize, String)>,
+	group: Option<usize>,
+	count: usize,
+	collapsed: bool,
+) {
+	let colors = design::palette(ui);
+	let (rect, response) =
+		ui.allocate_exact_size(vec2(ui.available_width(), ROW), egui::Sense::click());
+	let name = group
+		.and_then(|index| groups.get(index))
+		.map_or("Sans groupe", |group| group.name.as_str())
+		.to_owned();
+	if group.is_some() && (response.hovered() || response.has_focus()) {
+		ui.painter()
+			.rect_filled(rect, 8, design::row_highlight(ui, colors.hover, 1.0));
+	}
+	if group.is_some() {
+		icons::paint(
+			ui.painter(),
+			if collapsed {
+				Icon::ChevronRight
+			} else {
+				Icon::ChevronDown
+			},
+			egui::Rect::from_center_size(
+				egui::pos2(rect.left() + 20.0, rect.center().y),
+				egui::Vec2::splat(14.0),
+			),
+			colors.muted,
+		);
+	}
+	ui.painter().text(
+		egui::pos2(rect.left() + 34.0, rect.center().y),
+		egui::Align2::LEFT_CENTER,
+		format!("{} \u{2014} {count}", name.to_uppercase()),
+		egui::FontId::new(12.0, design::semibold_family(ui.ctx())),
+		colors.muted,
+	);
+	response.widget_info(|| {
+		egui::WidgetInfo::labeled(
+			egui::Role::Button,
+			group.is_some(),
+			format!("{name}, {count}"),
+		)
+	});
+	let Some(index) = group else {
+		return;
+	};
+	if response.clicked()
+		&& let Some(group) = groups.get_mut(index)
+	{
+		group.collapsed = !group.collapsed;
+	}
+	response.context_menu(|ui| {
+		ui.set_width(220.0);
+		let draft = rename.get_or_insert_with(|| (index, name.clone()));
+		if draft.0 != index {
+			*draft = (index, name.clone());
+		}
+		let edit = ui.add(
+			egui::TextEdit::singleline(&mut draft.1)
+				.char_limit(model::MAX_NAME)
+				.hint_text("Nom du groupe"),
+		);
+		let submit = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+		let new_name = draft.1.trim().to_owned();
+		if (ui.button("Renommer").clicked() || submit) && !new_name.is_empty() {
+			if let Some(group) = groups.get_mut(index) {
+				group.name = new_name;
+			}
+			*rename = None;
+			ui.close();
+			return;
+		}
+		ui.separator();
+		if index > 0 && ui.button("Monter").clicked() {
+			groups.swap(index, index - 1);
+			*rename = None;
+			ui.close();
+		}
+		if index + 1 < groups.len() && ui.button("Descendre").clicked() {
+			groups.swap(index, index + 1);
+			*rename = None;
+			ui.close();
+		}
+		if ui
+			.button(RichText::new("Supprimer le groupe").color(colors.danger))
+			.clicked()
+		{
+			// Friends go back to "no group"; nobody is removed from Discord.
+			groups.remove(index);
+			*rename = None;
+			ui.close();
+		}
+	});
+}
+/// "Move to group" entries for a friend's More menu.
+fn group_move_menu(ui: &mut egui::Ui, groups: &mut [model::FriendGroup], user: model::Id) {
+	if groups.is_empty() {
+		return;
+	}
+	let current = model::friend_group_of(groups, user.0);
+	ui.separator();
+	ui.menu_button("Déplacer vers le groupe", |ui| {
+		for index in 0..groups.len() {
+			let label = groups[index].name.clone();
+			if ui
+				.add(egui::Button::selectable(current == Some(index), label))
+				.clicked()
+			{
+				model::move_friend(groups, user.0, Some(index));
+				ui.close();
+			}
+		}
+		if current.is_some() {
+			ui.separator();
+			if ui.button("Retirer du groupe").clicked() {
+				model::move_friend(groups, user.0, None);
+				ui.close();
+			}
+		}
+	});
+}
+
 #[derive(Default, PartialEq, Eq, Clone, Copy)]
 enum Tab {
 	#[default]
@@ -527,6 +707,61 @@ impl MessagingUi {
 						colors.muted,
 					),
 				);
+				let grouping = matches!(self.friends.tab, Tab::Online | Tab::All);
+				if grouping {
+					ui.add_space(6.0);
+					ui.horizontal(|ui| {
+						ui.add_space(10.0);
+						let full = self.friend_groups.len() >= model::MAX_GROUPS;
+						let mut created = None;
+						let mut close = false;
+						match &mut self.friends.new_group {
+							Some(name) => {
+								let edit = ui.add(
+									egui::TextEdit::singleline(name)
+										.char_limit(model::MAX_NAME)
+										.desired_width(200.0)
+										.hint_text("Nom du groupe"),
+								);
+								let submit = edit.lost_focus()
+									&& ui.input(|i| i.key_pressed(egui::Key::Enter));
+								let ready = !full && !name.trim().is_empty();
+								if (ui.add_enabled(ready, egui::Button::new("Créer")).clicked()
+									|| submit) && ready
+								{
+									created = Some(name.trim().to_owned());
+								} else if ui.button("Annuler").clicked()
+									|| ui.input(|i| i.key_pressed(egui::Key::Escape))
+								{
+									close = true;
+								} else if name.is_empty() && !edit.has_focus() {
+									edit.request_focus();
+								}
+							}
+							None => {
+								if ui
+									.add_enabled(!full, egui::Button::new("+ Nouveau groupe"))
+									.on_hover_text(
+										"Clic droit sur un groupe pour le renommer, le déplacer ou le supprimer",
+									)
+									.clicked()
+								{
+									self.friends.new_group = Some(String::new());
+								}
+							}
+						}
+						if let Some(name) = created {
+							self.friend_groups.push(model::FriendGroup {
+								name,
+								..Default::default()
+							});
+							close = true;
+						}
+						if close {
+							self.friends.new_group = None;
+						}
+					});
+				}
 				ui.add_space(8.0);
 				ui.spacing_mut().item_spacing.y = 0.0;
 				if self.friends.list.is_empty() {
@@ -568,6 +803,11 @@ impl MessagingUi {
 					);
 					return;
 				}
+				let rows = if grouping {
+					grouped_rows(&self.friends.list, &self.friend_groups)
+				} else {
+					self.friends.list.iter().copied().map(Row::Friend).collect()
+				};
 				let mut after_hot = false;
 				self.scroll
 					.attach(
@@ -579,14 +819,35 @@ impl MessagingUi {
 						},
 						egui::ScrollArea::vertical().auto_shrink([false, false]),
 					)
-					.show_rows(ui, ROW, self.friends.list.len(), |ui, range| {
+					.show_rows(ui, ROW, rows.len(), |ui, range| {
 						for index in range {
+							let id = match rows[index] {
+								Row::Header {
+									group,
+									count,
+									collapsed,
+								} => {
+									ui.push_id(("friend-group", group), |ui| {
+										group_header(
+											ui,
+											&mut self.friend_groups,
+											&mut self.friends.rename,
+											group,
+											count,
+											collapsed,
+										);
+									});
+									after_hot = true;
+									continue;
+								}
+								Row::Friend(id) => id,
+							};
 							let restricted = (self.friends.tab == Tab::Restricted)
-								.then(|| state.restricted_user(self.friends.list[index]))
+								.then(|| state.restricted_user(id))
 								.flatten();
 							let user = restricted
 								.map(|(user, _, _)| user)
-								.or_else(|| state.friend(self.friends.list[index]));
+								.or_else(|| state.friend(id));
 							let Some(user) = user else {
 								continue;
 							};
@@ -779,7 +1040,10 @@ impl MessagingUi {
 										&mut self.profile,
 										&mut self.user_action,
 										None,
-									)
+									);
+									if restricted.is_none() {
+										group_move_menu(ui, &mut self.friend_groups, user.id);
+									}
 								});
 							});
 						}

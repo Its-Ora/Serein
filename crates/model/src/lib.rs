@@ -38,6 +38,8 @@ pub use cache_preferences::*;
 pub mod badges;
 mod cosmetics;
 pub use cosmetics::*;
+mod friend_groups;
+pub use friend_groups::*;
 mod profile;
 mod system_messages;
 pub use profile::*;

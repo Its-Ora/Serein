@@ -89,6 +89,10 @@ pub struct AppPreferences {
 	pub time_format: model::TimeFormat,
 	/// Owner opt-in: keep saved logins in private plain files when no OS keyring works.
 	pub plaintext_login: bool,
+	/// Online without alerts: no desktop notifications, sounds or badges while set.
+	pub quiet_online: bool,
+	/// Device-local friend groups; never sent to Discord.
+	pub friend_groups: Vec<model::FriendGroup>,
 }
 impl Default for AppPreferences {
 	fn default() -> Self {
@@ -128,6 +132,8 @@ impl Default for AppPreferences {
 			image_cache: Default::default(),
 			time_format: Default::default(),
 			plaintext_login: false,
+			quiet_online: false,
+			friend_groups: Vec::new(),
 		}
 	}
 }
@@ -153,6 +159,7 @@ impl AppPreferences {
 			&& self.muted_users.len() <= 64
 			&& self.keybinds.is_valid()
 			&& self.image_cache.is_valid()
+			&& model::friend_groups_valid(&self.friend_groups)
 			&& [&self.voice_input, &self.voice_output]
 				.into_iter()
 				.all(|value| value.as_ref().is_none_or(|value| value.len() <= 1024))

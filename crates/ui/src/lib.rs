@@ -347,6 +347,10 @@ pub struct MessagingUi {
 	pub time_format: model::TimeFormat,
 	/// Saved logins may fall back to plain files when no OS keyring works.
 	pub plaintext_login: bool,
+	/// Online without alerts: desktop notifications, sounds and ping badges are all off.
+	pub quiet_online: bool,
+	/// Device-local friend groups shown in the Online and All friends tabs.
+	pub friend_groups: Vec<model::FriendGroup>,
 	/// Latest disk use of the media and shared-artwork caches, once measured.
 	pub image_cache_usage: Option<[model::CacheUsage; 2]>,
 	/// An image cache partition the owner asked to empty; the desktop consumes it.

@@ -43,6 +43,9 @@ Windows uniquement. Chaque push sur `main` publie une nouvelle release automatiq
 - Fréquences : 15, **23,976 (film)**, 30, 60, **120 fps** (120 demande un écran à 120 Hz ou plus).
 - Preview de ton propre stream à 30 fps (avant : 10).
 
+**Vocal**
+- Quand un modo te déplace dans un autre salon (même un salon où tu n'as pas le droit d'aller), Serein te suit : même session, le son et la vidéo se reconnectent dans le nouveau salon. Avant, l'appel devenait muet et le bouton « Rejoindre » restait affiché.
+
 **Stickers**
 - Un sticker d'un autre serveur (sans Nitro) part direct en image, sans passer par la barre de message.
 

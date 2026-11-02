@@ -464,6 +464,48 @@ impl Voice {
 		let Event::Voice(event) = event else {
 			return None;
 		};
+		if let voice::Event::Moved { from, to, request } = event {
+			// Fork: follow a moderator's move. The session stays; only media reconnects.
+			let current = self
+				.live
+				.as_ref()
+				.filter(|live| {
+					(live.generation, live.channel, live.request)
+						== (state.generation, *from, *request)
+				})
+				.map(|live| (live.user, live.session.to_string()))
+				.or_else(|| {
+					self.pending
+						.as_ref()
+						.filter(|pending| {
+							(pending.generation, pending.channel, pending.request)
+								== (state.generation, *from, *request)
+						})
+						.and_then(|pending| {
+							Some((pending.user, pending.session.as_ref()?.expose().to_owned()))
+						})
+				});
+			if let Some((user, session)) = current {
+				let guild = state.voice.active.as_ref().and_then(|call| call.guild);
+				self.stop();
+				self.rejoin = None;
+				self.pending = Some(Pending {
+					generation: state.generation,
+					channel: *to,
+					request: *request,
+					ring: false,
+					user,
+					peer: None,
+					guild,
+					session: Secret::new(session).ok(),
+					negotiation_revision: None,
+					server: None,
+					started: Instant::now(),
+					failed_candidate: false,
+				});
+			}
+			return None;
+		}
 		if let voice::Event::TakenOver { channel, request } = event {
 			let current = self
 				.live

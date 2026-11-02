@@ -872,6 +872,41 @@ impl Calls {
 				return Ok(());
 			}
 		}
+		// Fork: a moderator moved this session to another channel of the same server, even one
+		// it could not join itself. Follow it with the same session instead of treating the
+		// move as another client taking the call over (which left the call silent).
+		if own
+			&& self.session_confirmed
+			&& state.guild_id.is_some()
+			&& state.guild_id == self.active_guild
+			&& let Some(to) = state.channel_id
+			&& let Some((from, request)) = self.active
+			&& to != from
+			&& session.as_ref().is_some_and(|session| {
+				self.active_session
+					.as_ref()
+					.is_some_and(|active| active.expose() == session.as_str())
+			}) {
+			self.allowed.insert(to, state.guild_id);
+			self.active = Some((to, request));
+			self.session_confirmed = false;
+			self.stream = None;
+			self.watches.clear();
+			self.camera = false;
+			self.negotiation_revision = self.negotiation_revision.wrapping_add(1);
+			emit(Event::Voice(voice::Event::Moved { from, to, request }))?;
+			// Discord sends a new server only when the channel lives elsewhere; until then
+			// the current one stays valid for the new channel.
+			if let Some((token, Some(endpoint))) = &self.negotiation_server {
+				emit(Event::Voice(voice::Event::Server {
+					request,
+					channel: to,
+					negotiation_revision: Some(self.negotiation_revision),
+					token: Some(Secret::new(token.expose().to_owned())?),
+					endpoint: Some(endpoint.clone()),
+				}))?;
+			}
+		}
 		let allowed = state
 			.channel_id
 			.is_none_or(|channel| self.allowed.get(&channel) == Some(&state.guild_id));
@@ -2039,6 +2074,82 @@ mod tests {
 					.is_some()
 			);
 		}
+	}
+
+	#[test]
+	fn a_moderator_move_keeps_the_session_and_follows_into_an_unjoinable_channel() {
+		let mut calls = Calls::default();
+		let guild = Some(Id(10));
+		// Channel 21 is not in the joinable set: the account could not enter it itself.
+		calls.allowed.insert(Id(20), guild);
+		let events = Mutex::new(Vec::new());
+		let emit = |event| {
+			events.lock().unwrap().push(event);
+			Ok(())
+		};
+		let update = |channel: Id| {
+			serde_json::to_vec(
+				&json!({"guild_id":guild,"channel_id":channel,"user_id":Id(1),"session_id":"local"}),
+			)
+			.unwrap()
+		};
+		calls
+			.packet(Command::Join {
+				channel: Id(20),
+				request: 5,
+				ring: false,
+				mute: false,
+				deaf: false,
+			})
+			.unwrap();
+		calls
+			.dispatch("VOICE_STATE_UPDATE", &update(Id(20)), Some(Id(1)), &emit)
+			.unwrap();
+		confirm_transport(&mut calls, &emit);
+		events.lock().unwrap().clear();
+		calls
+			.dispatch("VOICE_STATE_UPDATE", &update(Id(21)), Some(Id(1)), &emit)
+			.unwrap();
+		let events = events.into_inner().unwrap();
+		assert!(matches!(
+			events[0],
+			Event::Voice(voice::Event::Moved {
+				from: Id(20),
+				to: Id(21),
+				request: 5
+			})
+		));
+		// The current server is handed over for the new channel, then the same session.
+		assert!(matches!(
+			&events[1],
+			Event::Voice(voice::Event::Server {
+				channel: Id(21),
+				request: 5,
+				token: Some(_),
+				..
+			})
+		));
+		assert!(matches!(
+			&events[2],
+			Event::Voice(voice::Event::State {
+				channel: Some(Id(21)),
+				request: Some(5),
+				session: Some(_),
+				..
+			})
+		));
+		assert!(
+			!events
+				.iter()
+				.any(|event| matches!(event, Event::Voice(voice::Event::TakenOver { .. })))
+		);
+		assert_eq!(calls.active, Some((Id(21), 5)));
+		// The new transport can confirm in the new channel.
+		assert!(
+			calls
+				.confirm_session(Id(21), 5, calls.negotiation_revision)
+				.is_some()
+		);
 	}
 
 	#[test]

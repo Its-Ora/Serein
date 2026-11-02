@@ -293,6 +293,13 @@ pub enum Event {
 		channel: Id,
 		request: u64,
 	},
+	/// Fork: a moderator moved this session to another voice channel of the same server.
+	/// Media reconnects there with the same session.
+	Moved {
+		from: Id,
+		to: Id,
+		request: u64,
+	},
 	Departed {
 		channel: Id,
 		request: u64,
@@ -775,6 +782,21 @@ impl ClientState {
 			}
 			Event::Departed { channel, request } => {
 				self.voice.departed = Some((channel, request));
+			}
+			Event::Moved { from, to, request } => {
+				if let Some(call) = &mut self.voice.active
+					&& call.channel == from
+					&& call.request == request
+				{
+					call.channel = to;
+					call.phase = Phase::Connecting;
+					call.participants.clear();
+					call.watching.clear();
+					call.camera = false;
+					call.reconnecting = None;
+					call.channel_started_at = None;
+					self.status = "Moved to another voice channel";
+				}
 			}
 			Event::Snapshot {
 				partial,

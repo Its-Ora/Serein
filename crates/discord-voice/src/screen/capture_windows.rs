@@ -283,7 +283,7 @@ where
 		stop,
 		pending,
 		next_frame: Instant::now(),
-		interval: Duration::from_secs_f64(1.0 / f64::from(settings.fps)),
+		interval: settings.frame_interval(),
 	};
 	let native = Settings::new(
 		item,
@@ -299,7 +299,13 @@ where
 			DrawBorderSettings::Default
 		},
 		SecondaryWindowSettings::Default,
-		MinimumUpdateIntervalSettings::Default,
+		// Fork: Windows paces capture near 60 fps unless asked otherwise; 120 fps streams
+		// need every refresh, and the encoder loop still paces to the chosen rate.
+		if settings.fps > 60 {
+			MinimumUpdateIntervalSettings::Custom(Duration::from_millis(1))
+		} else {
+			MinimumUpdateIntervalSettings::Default
+		},
 		DirtyRegionSettings::Default,
 		ColorFormat::Bgra8,
 		flags,

@@ -83,7 +83,6 @@ impl Settings {
 			plaintext_login: ui.plaintext_login,
 			quiet_online: ui.quiet_online,
 			friend_groups: ui.friend_groups.clone(),
-			stream_bitrate_mbps: ui.screen.bitrate_mbps,
 			hide_non_streamers: ui.hide_non_streamers,
 		};
 		if value != self.current {
@@ -136,8 +135,6 @@ impl Settings {
 		ui.plaintext_login = value.plaintext_login;
 		ui.quiet_online = value.quiet_online;
 		ui.friend_groups.clone_from(&value.friend_groups);
-		ui.screen.bitrate_mbps = value.stream_bitrate_mbps;
-		client_core::screen::set_bitrate_override(value.stream_bitrate_mbps);
 		ui.hide_non_streamers = value.hide_non_streamers;
 		ui::local_time::set_format(ui.time_format, ui.language);
 	}

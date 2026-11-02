@@ -33,51 +33,40 @@ pub struct Settings {
 	/// Share system audio with the screen; call microphone settings are independent.
 	pub audio: bool,
 }
-/// Fork: owner-chosen stream bitrate in kbit/s; 0 keeps the automatic table.
-static BITRATE_OVERRIDE_KBPS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-/// Highest manual stream bitrate accepted, in Mbit/s.
-pub const MAX_MANUAL_MBPS: u32 = 80;
-
-/// Set the manual stream bitrate (Mbit/s); 0 returns to automatic. Applies to the next
-/// stream start and to the running stream's ceiling.
-pub fn set_bitrate_override(mbps: u32) {
-	BITRATE_OVERRIDE_KBPS.store(
-		mbps.min(MAX_MANUAL_MBPS) * 1000,
-		std::sync::atomic::Ordering::Relaxed,
-	);
-}
-pub fn bitrate_override_mbps() -> u32 {
-	BITRATE_OVERRIDE_KBPS.load(std::sync::atomic::Ordering::Relaxed) / 1000
-}
+/// Fork: the Go Live bitrate Discord is reported to accept (about 10 Mbit/s; above it the
+/// stream loses packets for every viewer). Every stream aims for it; Discord's own REMB
+/// estimate still lowers it on a congested path.
+pub const DISCORD_STREAM_CAP: u32 = 10_000_000;
+/// Film cadence: `fps == 23` means 24000/1001 (23.976) frames per second.
+pub const FILM_FPS: u32 = 23;
 
 impl Settings {
 	pub fn valid(self) -> bool {
 		!matches!(self.source, SourceId::Display(0) | SourceId::Window(0))
 			&& matches!(
 				(self.width, self.height),
-				(854, 480) | (1280, 720) | (1920, 1080) | (2560, 1440)
-			) && matches!(self.fps, 15 | 30 | 60)
+				(854, 480) | (1280, 720) | (1664, 936) | (1920, 1080)
+			) && matches!(self.fps, 15 | FILM_FPS | 30 | 60 | 120)
 	}
 
-	/// Encoder ceiling. Fork: higher automatic rates (upstream's 1080p30 at 8 Mbit/s looked
-	/// soft on films and games) and an optional manual value.
+	/// Encoder ceiling. Fork: always the most Discord accepts, whatever the resolution
+	/// (upstream used 2-16 Mbit/s by resolution, so most streams sent far less).
 	pub fn bit_rate(self) -> u32 {
-		let manual = BITRATE_OVERRIDE_KBPS.load(std::sync::atomic::Ordering::Relaxed);
-		if manual > 0 {
-			return manual.saturating_mul(1000).max(500_000);
+		DISCORD_STREAM_CAP
+	}
+
+	/// Whole frames per second for encoders and signaling (23.976 rounds to 24).
+	pub fn nominal_fps(self) -> u32 {
+		if self.fps == FILM_FPS { 24 } else { self.fps }
+	}
+
+	/// Exact capture/encode pacing, including the 24000/1001 film cadence.
+	pub fn frame_interval(self) -> std::time::Duration {
+		if self.fps == FILM_FPS {
+			std::time::Duration::from_nanos(1_001_000_000 / 24)
+		} else {
+			std::time::Duration::from_secs_f64(1.0 / f64::from(self.fps.max(1)))
 		}
-		let base: u32 = match (self.width, self.height) {
-			(854, 480) => 3_000_000,
-			(1920, 1080) => 10_000_000,
-			(2560, 1440) => 16_000_000,
-			_ => 6_000_000,
-		};
-		match self.fps {
-			60 => base / 5 * 8,
-			15 => base / 2,
-			_ => base,
-		}
-		.min(40_000_000)
 	}
 }
 

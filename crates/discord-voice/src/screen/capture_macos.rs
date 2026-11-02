@@ -464,7 +464,7 @@ impl Capture {
 			.with_preserves_aspect_ratio(true)
 			.with_scales_to_fit(true)
 			.with_shows_cursor(settings.cursor)
-			.with_fps(settings.fps)
+			.with_fps(settings.nominal_fps())
 			.with_queue_depth(3);
 		if audio.is_some() {
 			// Serein's own playback is excluded so the call is not echoed into the stream.

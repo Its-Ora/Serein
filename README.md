@@ -38,8 +38,9 @@ Windows uniquement. Chaque push sur `main` publie une nouvelle release automatiq
 - Bascule auto vers le décodage logiciel si le décodeur GPU ne sort aucune image.
 
 **Streams (partager)**
-- 1440p disponible en plus de 480p / 720p / 1080p.
-- Débit réglable : Auto ou 8 / 12 / 20 / 30 / 50 Mb/s (gardé entre les sessions). Auto plus généreux qu'avant (1080p30 ≈ 10 Mb/s, 1440p30 ≈ 16 Mb/s, ×1,6 en 60 fps).
+- Débit toujours au maximum accepté par Discord (≈ 10 Mb/s), quelle que soit la résolution ; il ne baisse que si le réseau sature. Avant : 2 à 8 Mb/s selon la résolution.
+- Résolutions : 480p, 720p, **936p** (1664×936, le meilleur compromis à 10 Mb/s), 1080p.
+- Fréquences : 15, **23,976 (film)**, 30, 60, **120 fps** (120 demande un écran à 120 Hz ou plus).
 - Preview de ton propre stream à 30 fps (avant : 10).
 
 **Stickers**

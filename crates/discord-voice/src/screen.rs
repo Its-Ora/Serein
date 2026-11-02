@@ -373,7 +373,7 @@ fn encode_loop(
 		}
 		// Pace on an accumulating schedule with a little tolerance: capture timing jitter must
 		// not skip every other frame, and a stalled encoder resumes from now instead of bursting.
-		let interval = Duration::from_secs_f64(1.0 / f64::from(settings.fps));
+		let interval = settings.frame_interval();
 		if now + Duration::from_millis(2) < next_frame {
 			continue;
 		}
@@ -475,7 +475,7 @@ impl ScreenEncoder {
 		let config = crate::video_encode::Config {
 			width: settings.width,
 			height: settings.height,
-			fps: settings.fps,
+			fps: settings.nominal_fps(),
 			bit_rate: bitrate,
 			max_bytes: MAX_ENCODED_BYTES,
 			profile: crate::video_encode::Profile::Main,
@@ -613,7 +613,7 @@ pub(super) fn encoder(settings: Settings, bitrate: u32) -> Result<Encoder, &'sta
 		.bitrate(BitRate::from_bps(
 			bitrate.clamp(250_000, settings.bit_rate()),
 		))
-		.max_frame_rate(FrameRate::from_hz(settings.fps as f32))
+		.max_frame_rate(FrameRate::from_hz(settings.nominal_fps() as f32))
 		.usage_type(UsageType::ScreenContentRealTime)
 		.rate_control_mode(RateControlMode::Bitrate)
 		.complexity(if cfg!(target_os = "windows") {
@@ -622,7 +622,9 @@ pub(super) fn encoder(settings: Settings, bitrate: u32) -> Result<Encoder, &'sta
 			Complexity::Medium
 		})
 		.num_threads(encoder_threads())
-		.intra_frame_period(IntraFramePeriod::from_num_frames(settings.fps * 2));
+		.intra_frame_period(IntraFramePeriod::from_num_frames(
+			settings.nominal_fps() * 2,
+		));
 	Encoder::with_api_config(OpenH264API::from_source(), config)
 		.map_err(|_| "Screen video encoder is unavailable")
 }

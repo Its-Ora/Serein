@@ -115,17 +115,17 @@ impl Capture {
 			Mode::Va => format!(
 				"vah264enc name=encoder rate-control=cbr bitrate={} key-int-max={} b-frames=0",
 				bitrate / 1000,
-				settings.fps * 2
+				settings.nominal_fps() * 2
 			),
 			Mode::VaLegacy => format!(
 				"vaapih264enc name=encoder rate-control=cbr bitrate={} keyframe-period={} max-bframes=0 cabac=false dct8x8=false",
 				bitrate / 1000,
-				settings.fps * 2
+				settings.nominal_fps() * 2
 			),
 			Mode::Nvidia | Mode::NvidiaCopy => format!(
 				"nvh264enc name=encoder rc-mode=cbr bitrate={} gop-size={} bframes=0 rc-lookahead=0 zerolatency=true",
 				bitrate / 1000,
-				settings.fps * 2
+				settings.nominal_fps() * 2
 			),
 			Mode::Software => String::new(),
 		};
@@ -147,7 +147,7 @@ impl Capture {
 			split. ! queue max-size-buffers=1 max-size-bytes={MAX_RAW_BYTES} max-size-time=0 leaky=downstream ! \
 			valve name=preview-gate drop-mode=forward-sticky-events ! videorate drop-only=true ! video/x-raw(ANY),framerate=10/1 ! {preview_scale} ! \
 			appsink name=preview sync=false async=false max-buffers=1 drop=true enable-last-sample=false wait-on-eos=false",
-			settings.fps
+			settings.nominal_fps()
 		);
 		let bin = gst::parse::bin_from_description(&description, true).map_err(|_| UNAVAILABLE)?;
 		let pipeline = gst::Pipeline::new();

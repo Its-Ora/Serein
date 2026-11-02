@@ -27,8 +27,6 @@ pub struct ScreenUi {
 	fps: u32,
 	cursor: bool,
 	audio: bool,
-	/// Fork: manual stream bitrate in Mbit/s, 0 for automatic; saved with device settings.
-	pub bitrate_mbps: u32,
 }
 impl Default for ScreenUi {
 	fn default() -> Self {
@@ -48,7 +46,6 @@ impl Default for ScreenUi {
 			fps: 30,
 			cursor: true,
 			audio: cfg!(target_os = "macos"),
-			bitrate_mbps: 0,
 		}
 	}
 }
@@ -98,8 +95,8 @@ impl ScreenUi {
 			source,
 			width: match self.height {
 				480 => 854,
+				936 => 1664,
 				1080 => 1920,
-				1440 => 2560,
 				_ => 1280,
 			},
 			height: self.height,
@@ -107,7 +104,6 @@ impl ScreenUi {
 			cursor: self.cursor,
 			audio: self.audio,
 		};
-		client_core::screen::set_bitrate_override(self.bitrate_mbps);
 		settings.valid().then_some(settings)
 	}
 	pub(super) fn show(&mut self, ctx: &egui::Context, state: &State) {
@@ -211,8 +207,13 @@ impl ScreenUi {
 		ui.add_space(6.0);
 		ui.horizontal_wrapped(|ui| {
 			ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
-			for height in [480, 720, 1080, 1440] {
-				if segment(ui, &format!("{height}p"), self.height == height).clicked() {
+			for height in [480, 720, 936, 1080] {
+				let label = if height == 936 {
+					"936p · idéal 10 Mb/s".to_owned()
+				} else {
+					format!("{height}p")
+				};
+				if segment(ui, &label, self.height == height).clicked() {
 					self.height = height;
 				}
 			}
@@ -226,37 +227,23 @@ impl ScreenUi {
 		ui.add_space(6.0);
 		ui.horizontal_wrapped(|ui| {
 			ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
-			for fps in [15, 30, 60] {
-				if segment(ui, &format!("{fps} fps"), self.fps == fps).clicked() {
-					self.fps = fps;
-				}
-			}
-		});
-		ui.add_space(8.0);
-		ui.label(crate::design::eyebrow(ui, "DÉBIT", colors.muted));
-		ui.add_space(6.0);
-		ui.horizontal_wrapped(|ui| {
-			ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
-			for mbps in [0, 8, 12, 20, 30, 50] {
-				let label = if mbps == 0 {
-					"Auto".to_owned()
+			for fps in [15, client_core::screen::FILM_FPS, 30, 60, 120] {
+				let label = if fps == client_core::screen::FILM_FPS {
+					"23,976 fps · film".to_owned()
 				} else {
-					format!("{mbps} Mb/s")
+					format!("{fps} fps")
 				};
-				if segment(ui, &label, self.bitrate_mbps == mbps).clicked() {
-					self.bitrate_mbps = mbps;
-					client_core::screen::set_bitrate_override(mbps);
+				if segment(ui, &label, self.fps == fps).clicked() {
+					self.fps = fps;
 				}
 			}
 		});
 		ui.add_space(2.0);
 		ui.add(
 			egui::Label::new(
-				egui::RichText::new(if self.bitrate_mbps == 0 {
-					"Auto : 1080p30 ≈ 10 Mb/s, 1440p30 ≈ 16 Mb/s, ×1,6 en 60 fps. Le débit baisse seul si le réseau sature."
-				} else {
-					"Débit maximum fixe. Le débit baisse quand même si le réseau ou Discord sature, pour éviter les freezes chez les viewers."
-				})
+				egui::RichText::new(
+					"Débit : toujours le maximum accepté par Discord (≈ 10 Mb/s), baissé seulement si le réseau sature. 120 fps demande un écran à 120 Hz ou plus.",
+				)
 				.size(12.0)
 				.color(colors.muted),
 			)

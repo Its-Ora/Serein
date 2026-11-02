@@ -27,6 +27,8 @@ pub struct ScreenUi {
 	fps: u32,
 	cursor: bool,
 	audio: bool,
+	/// Fork: manual stream bitrate in Mbit/s, 0 for automatic; saved with device settings.
+	pub bitrate_mbps: u32,
 }
 impl Default for ScreenUi {
 	fn default() -> Self {
@@ -46,6 +48,7 @@ impl Default for ScreenUi {
 			fps: 30,
 			cursor: true,
 			audio: cfg!(target_os = "macos"),
+			bitrate_mbps: 0,
 		}
 	}
 }
@@ -96,6 +99,7 @@ impl ScreenUi {
 			width: match self.height {
 				480 => 854,
 				1080 => 1920,
+				1440 => 2560,
 				_ => 1280,
 			},
 			height: self.height,
@@ -103,6 +107,7 @@ impl ScreenUi {
 			cursor: self.cursor,
 			audio: self.audio,
 		};
+		client_core::screen::set_bitrate_override(self.bitrate_mbps);
 		settings.valid().then_some(settings)
 	}
 	pub(super) fn show(&mut self, ctx: &egui::Context, state: &State) {
@@ -206,7 +211,7 @@ impl ScreenUi {
 		ui.add_space(6.0);
 		ui.horizontal_wrapped(|ui| {
 			ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
-			for height in [480, 720, 1080] {
+			for height in [480, 720, 1080, 1440] {
 				if segment(ui, &format!("{height}p"), self.height == height).clicked() {
 					self.height = height;
 				}
@@ -227,6 +232,36 @@ impl ScreenUi {
 				}
 			}
 		});
+		ui.add_space(8.0);
+		ui.label(crate::design::eyebrow(ui, "DÉBIT", colors.muted));
+		ui.add_space(6.0);
+		ui.horizontal_wrapped(|ui| {
+			ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+			for mbps in [0, 8, 12, 20, 30, 50] {
+				let label = if mbps == 0 {
+					"Auto".to_owned()
+				} else {
+					format!("{mbps} Mb/s")
+				};
+				if segment(ui, &label, self.bitrate_mbps == mbps).clicked() {
+					self.bitrate_mbps = mbps;
+					client_core::screen::set_bitrate_override(mbps);
+				}
+			}
+		});
+		ui.add_space(2.0);
+		ui.add(
+			egui::Label::new(
+				egui::RichText::new(if self.bitrate_mbps == 0 {
+					"Auto : 1080p30 ≈ 10 Mb/s, 1440p30 ≈ 16 Mb/s, ×1,6 en 60 fps. Le débit baisse seul si le réseau sature."
+				} else {
+					"Débit maximum fixe. Le débit baisse quand même si le réseau ou Discord sature, pour éviter les freezes chez les viewers."
+				})
+				.size(12.0)
+				.color(colors.muted),
+			)
+			.wrap(),
+		);
 		ui.add_space(4.0);
 		ui.add(
 			egui::Label::new(

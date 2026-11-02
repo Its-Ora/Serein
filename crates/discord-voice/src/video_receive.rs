@@ -27,7 +27,8 @@ const QUEUE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_WIDTH: u32 = platform::video::MAX_LIVE_SIDE;
 const MAX_PIXELS: u64 = platform::video::MAX_LIVE_PIXELS;
 const START_CODE: [u8; 4] = [0, 0, 0, 1];
-const MAX_DECODE_AGE: Duration = Duration::from_millis(150);
+// Fork: 300 ms (was 150) so a briefly slow decoder does not drop pictures and wait for a keyframe.
+const MAX_DECODE_AGE: Duration = Duration::from_millis(300);
 
 /// One decoded remote picture in the decoder's native layout (NV12 or I420 on every
 /// current backend); the renderer converts colour.
@@ -156,6 +157,173 @@ pub(crate) struct Assembler {
 	// Only packets of the current picture; the next timestamp expires missing fragments.
 	pending: Vec<(u16, bool, Vec<u8>)>,
 	pending_bytes: usize,
+	/// Fork: holds packets after a gap so a retransmission can fill it.
+	reorder: Reorder,
+}
+
+/// How long packets after a gap wait for the missing ones before the picture is given up.
+/// A few round trips to Discord's media server; long enough for a NACK retransmission.
+const REORDER_WAIT: Duration = Duration::from_millis(160);
+/// Packets held behind one gap (about a quarter second of a 30 Mbit/s share).
+const REORDER_PACKETS: usize = 1024;
+const REORDER_BYTES: usize = 4 * 1024 * 1024;
+/// A missing packet is requested again at most this often, a bounded number of times.
+const NACK_RETRY: Duration = Duration::from_millis(40);
+const NACK_ATTEMPTS: u8 = 3;
+
+/// Fork: per-source sequence buffer in front of the assembler. Upstream gave up on a picture
+/// as soon as one packet was missing and only asked for a new keyframe (at most every
+/// 500 ms), so a single lost packet froze the stream for most of a second. Packets are now
+/// released in order; a gap is held for `REORDER_WAIT` while its packets are NACKed, and
+/// only then skipped (the assembler sees the gap and the keyframe path takes over).
+#[derive(Default)]
+struct Reorder {
+	next: Option<u16>,
+	/// `slots[i]` is sequence `next + i`.
+	slots: std::collections::VecDeque<Option<(u32, bool, Vec<u8>)>>,
+	bytes: usize,
+	gap_since: Option<Instant>,
+	/// Missing sequences already requested: (sequence, last request, attempts).
+	requested: Vec<(u16, Instant, u8)>,
+}
+impl Reorder {
+	/// Insert one packet; returns the packets now releasable in sequence order.
+	fn insert(
+		&mut self,
+		sequence: u16,
+		timestamp: u32,
+		marker: bool,
+		payload: &[u8],
+		now: Instant,
+	) -> Vec<(u16, u32, bool, Vec<u8>)> {
+		let next = *self.next.get_or_insert(sequence);
+		let distance = sequence.wrapping_sub(next) as usize;
+		if distance >= 32768 {
+			return Vec::new(); // Duplicate or a retransmission that arrived too late.
+		}
+		if distance >= REORDER_PACKETS || self.bytes + payload.len() > REORDER_BYTES {
+			// Far ahead of a gap we cannot fill: release what we have and resume here.
+			let mut out = self.skip_all();
+			self.next = Some(sequence);
+			self.place(0, timestamp, marker, payload);
+			out.extend(self.drain());
+			return out;
+		}
+		self.place(distance, timestamp, marker, payload);
+		let mut out = self.drain();
+		if self.slots.is_empty() {
+			self.gap_since = None;
+		} else {
+			let since = *self.gap_since.get_or_insert(now);
+			if now.duration_since(since) >= REORDER_WAIT {
+				out.extend(self.skip_gap());
+				self.gap_since = (!self.slots.is_empty()).then_some(now);
+			}
+		}
+		out
+	}
+	fn place(&mut self, distance: usize, timestamp: u32, marker: bool, payload: &[u8]) {
+		while self.slots.len() <= distance {
+			self.slots.push_back(None);
+		}
+		if self.slots[distance].is_none() {
+			self.bytes += payload.len();
+			self.slots[distance] = Some((timestamp, marker, payload.to_vec()));
+		}
+	}
+	/// Release the in-order run at the front.
+	fn drain(&mut self) -> Vec<(u16, u32, bool, Vec<u8>)> {
+		let mut out = Vec::new();
+		while let Some(Some(_)) = self.slots.front() {
+			let (timestamp, marker, payload) = self.slots.pop_front().flatten().expect("front");
+			self.bytes -= payload.len();
+			let sequence = self.next.expect("started");
+			self.next = Some(sequence.wrapping_add(1));
+			out.push((sequence, timestamp, marker, payload));
+		}
+		let next = self.next;
+		self.requested
+			.retain(|(sequence, ..)| next.is_some_and(|next| sequence.wrapping_sub(next) < 32768));
+		out
+	}
+	/// Give up on the oldest gap: skip its missing packets and release what follows.
+	fn skip_gap(&mut self) -> Vec<(u16, u32, bool, Vec<u8>)> {
+		while let Some(None) = self.slots.front() {
+			self.slots.pop_front();
+			self.next = self.next.map(|next| next.wrapping_add(1));
+		}
+		self.drain()
+	}
+	fn skip_all(&mut self) -> Vec<(u16, u32, bool, Vec<u8>)> {
+		let mut out = Vec::new();
+		while !self.slots.is_empty() {
+			out.extend(self.skip_gap());
+		}
+		self.gap_since = None;
+		self.requested.clear();
+		out
+	}
+	/// Missing sequences due for a (re)request.
+	fn nacks(&mut self, now: Instant) -> Vec<u16> {
+		let Some(next) = self.next else {
+			return Vec::new();
+		};
+		let Some(last) = self.slots.iter().rposition(Option::is_some) else {
+			return Vec::new();
+		};
+		let mut due = Vec::new();
+		for (index, slot) in self.slots.iter().enumerate().take(last) {
+			if slot.is_some() || due.len() >= 128 {
+				continue;
+			}
+			let sequence = next.wrapping_add(index as u16);
+			let full = self.requested.len() >= 512;
+			match self.requested.iter_mut().find(|(seq, ..)| *seq == sequence) {
+				Some((_, at, attempts)) => {
+					if *attempts < NACK_ATTEMPTS && now.duration_since(*at) >= NACK_RETRY {
+						*at = now;
+						*attempts += 1;
+						due.push(sequence);
+					}
+				}
+				None if !full => {
+					self.requested.push((sequence, now, 1));
+					due.push(sequence);
+				}
+				None => {}
+			}
+		}
+		due
+	}
+}
+
+/// RFC 4585 Generic NACK for lost RTP sequences of one media SSRC.
+pub(crate) fn nack(sender: u32, media: u32, lost: &[u16]) -> Option<([u8; 8], Vec<u8>)> {
+	let mut entries: Vec<(u16, u16)> = Vec::new();
+	for &sequence in lost {
+		if let Some((pid, mask)) = entries.last_mut() {
+			let offset = sequence.wrapping_sub(*pid);
+			if (1..=16).contains(&offset) {
+				*mask |= 1 << (offset - 1);
+				continue;
+			}
+		}
+		entries.push((sequence, 0));
+	}
+	if entries.is_empty() || entries.len() > 64 {
+		return None;
+	}
+	let length = 2 + entries.len() as u16;
+	let mut header = [0x81, 205, 0, 0, 0, 0, 0, 0];
+	header[2..4].copy_from_slice(&length.to_be_bytes());
+	header[4..].copy_from_slice(&sender.to_be_bytes());
+	let mut body = Vec::with_capacity(4 + entries.len() * 4);
+	body.extend_from_slice(&media.to_be_bytes());
+	for (pid, mask) in entries {
+		body.extend_from_slice(&pid.to_be_bytes());
+		body.extend_from_slice(&mask.to_be_bytes());
+	}
+	Some((header, body))
 }
 impl Assembler {
 	/// Feed one packet; returns a complete access unit when the marker closes an intact frame.
@@ -455,6 +623,51 @@ impl Receivers {
 			return true;
 		}
 		!self.awaiting_keyframe.contains(&user)
+	}
+	/// Fork: like `push`, but through the per-source sequence buffer, so a gap waits for its
+	/// retransmission. Several pictures can complete at once when a gap fills.
+	pub fn push_buffered(
+		&mut self,
+		ssrc: u32,
+		sequence: u16,
+		timestamp: u32,
+		marker: bool,
+		payload: &[u8],
+		now: Instant,
+	) -> Vec<(u64, Vec<u8>)> {
+		let Some((_, user, assembler)) = self.sources.iter_mut().find(|(s, _, _)| *s == ssrc)
+		else {
+			self.stats.unknown_ssrc += 1;
+			return Vec::new();
+		};
+		let user = *user;
+		let released = assembler
+			.reorder
+			.insert(sequence, timestamp, marker, payload, now);
+		let mut frames = Vec::new();
+		let mut lost = false;
+		for (sequence, timestamp, marker, payload) in released {
+			if let Some(frame) = assembler.push(sequence, timestamp, marker, &payload) {
+				frames.push((user, frame));
+			}
+			lost |= std::mem::take(&mut assembler.lost);
+		}
+		self.stats.incomplete += u64::from(lost);
+		self.stats.complete += frames.len() as u64;
+		if lost {
+			self.require_keyframe(user);
+		}
+		frames
+	}
+	/// Missing packets to request, per media SSRC.
+	pub fn nacks(&mut self, now: Instant) -> Vec<(u32, Vec<u16>)> {
+		self.sources
+			.iter_mut()
+			.filter_map(|(ssrc, _, assembler)| {
+				let due = assembler.reorder.nacks(now);
+				(!due.is_empty()).then_some((*ssrc, due))
+			})
+			.collect()
 	}
 	/// Returns the owning user and a complete encrypted access unit when one closes.
 	pub fn push(
@@ -1402,6 +1615,52 @@ mod tests {
 		assert!(bounded(3840, 2160).is_ok());
 		assert!(bounded(7680, 4320).is_err());
 		assert!(bounded(0, 4).is_err());
+	}
+	#[test]
+	fn reorder_waits_for_a_retransmission_then_gives_up() {
+		let start = Instant::now();
+		let mut reorder = Reorder::default();
+		let seqs =
+			|out: Vec<(u16, u32, bool, Vec<u8>)>| out.iter().map(|p| p.0).collect::<Vec<_>>();
+		assert_eq!(seqs(reorder.insert(10, 1, false, &[1], start)), [10]);
+		// 11 is lost: 12 and 13 wait, and 11 is requested once per retry interval.
+		assert!(reorder.insert(12, 1, false, &[3], start).is_empty());
+		assert!(reorder.insert(13, 1, true, &[4], start).is_empty());
+		assert_eq!(reorder.nacks(start), [11]);
+		assert!(reorder.nacks(start).is_empty());
+		assert_eq!(reorder.nacks(start + NACK_RETRY), [11]);
+		// The retransmission releases the whole picture in order.
+		assert_eq!(
+			seqs(reorder.insert(11, 1, false, &[2], start)),
+			[11, 12, 13]
+		);
+		// A gap that never fills is skipped after the wait.
+		assert!(reorder.insert(15, 2, true, &[6], start).is_empty());
+		assert_eq!(
+			seqs(reorder.insert(16, 3, true, &[7], start + REORDER_WAIT)),
+			[15, 16]
+		);
+		// Late duplicates of released packets are ignored.
+		assert!(
+			reorder
+				.insert(11, 1, false, &[2], start + REORDER_WAIT)
+				.is_empty()
+		);
+		// Sequence numbers wrap.
+		let mut wrap = Reorder::default();
+		assert_eq!(seqs(wrap.insert(65535, 9, false, &[1], start)), [65535]);
+		assert_eq!(seqs(wrap.insert(0, 9, true, &[1], start)), [0]);
+	}
+	#[test]
+	fn nack_packs_nearby_losses_into_one_entry() {
+		let (header, body) = nack(7, 100, &[10, 11, 13, 40]).unwrap();
+		assert_eq!(header[..2], [0x81, 205]);
+		// Two FCI entries: 10 with 11 and 13 in its bitmask, then 40.
+		assert_eq!(u16::from_be_bytes([header[2], header[3]]), 4);
+		assert_eq!(body[..4], 100u32.to_be_bytes());
+		assert_eq!(body[4..8], [0, 10, 0, 0b101]);
+		assert_eq!(body[8..12], [0, 40, 0, 0]);
+		assert!(nack(7, 100, &[]).is_none());
 	}
 	#[test]
 	fn software_decoders_reuse_scratch_across_alternating_resolutions() {

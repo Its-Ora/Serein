@@ -40,7 +40,8 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 pub const MAX_RAW_BYTES: usize = 3840 * 2160 * 4;
-pub const MAX_ENCODED_BYTES: usize = 2 * 1024 * 1024;
+/// Fork: high-bitrate 1440p keyframes exceed the upstream 2 MiB.
+pub const MAX_ENCODED_BYTES: usize = 4 * 1024 * 1024;
 
 pub struct RawFrame {
 	pub width: u32,
@@ -350,7 +351,8 @@ fn encode_loop(
 				if let Ok(mut slot) = preview.try_lock() {
 					*slot = Some(image);
 				}
-				next_preview = now + Duration::from_millis(100);
+				// Fork: 30 fps local preview (upstream refreshed it every 100 ms).
+				next_preview = now + Duration::from_millis(33);
 				wake();
 			}
 		}
@@ -704,7 +706,7 @@ pub(super) fn preview_frame(frame: &RawFrame) -> Result<image::RgbaImage, &'stat
 		.min(1.0);
 	let width = (f64::from(frame.width) * scale).round().max(1.0) as u32;
 	let height = (f64::from(frame.height) * scale).round().max(1.0) as u32;
-	// ponytail: nearest sampling keeps the ten-fps preview cheap; use filtered scaling if needed.
+	// ponytail: nearest sampling keeps the 30 fps preview cheap; use filtered scaling if needed.
 	Ok(image::RgbaImage::from_fn(width, height, |x, y| {
 		let source_x = (x * frame.width / width) as usize;
 		let source_y = (y * frame.height / height) as usize;

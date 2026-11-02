@@ -38,7 +38,11 @@ impl ExtensionContext {
 			app_wide: false,
 			generation: state.generation,
 			channel: state.selected,
-			watched_stream: state.voice.active.as_ref().and_then(|call| call.watching),
+			watched_stream: state
+				.voice
+				.active
+				.as_ref()
+				.and_then(|call| call.watching.first().copied()),
 			voice_request: state
 				.voice
 				.active

@@ -37,6 +37,9 @@ struct WatchAttempt {
 	created: Option<(Id, Id)>,
 }
 
+/// Streams watched at once (fork). Each is its own media connection.
+pub const MAX_WATCHES: usize = 4;
+
 #[derive(Default)]
 pub(super) struct Calls {
 	pub(super) allowed: BTreeMap<Id, Option<Id>>,
@@ -61,7 +64,10 @@ pub(super) struct Calls {
 	departing_session: Option<Secret>,
 	pub(super) departure_deadline: Option<Instant>,
 	stream: Option<StreamAttempt>,
-	watch: Option<WatchAttempt>,
+	/// Fork: several streams can be watched at once (bounded by `MAX_WATCHES`).
+	watches: Vec<WatchAttempt>,
+	/// Index in `watches` that the stream event being dispatched belongs to.
+	watch_focus: usize,
 	// Optional metadata, retained until READY_SUPPLEMENTAL or reset within the roster budget.
 	// Overflow leaves participants using the existing user-ID fallback.
 	pub(super) users: BTreeMap<Id, User>,
@@ -91,7 +97,7 @@ impl Calls {
 		self.departing_session = None;
 		self.departure_deadline = None;
 		self.stream = None;
-		self.watch = None;
+		self.watches.clear();
 		self.users.clear();
 	}
 	pub(super) fn invalidate(&mut self, channel: Id) {
@@ -103,7 +109,7 @@ impl Calls {
 			self.negotiation_server = None;
 			self.session_confirmed = false;
 			self.stream = None;
-			self.watch = None;
+			self.watches.clear();
 			self.camera = false;
 		}
 	}
@@ -316,7 +322,7 @@ impl Calls {
 				}
 				self.active = Some((channel, request));
 				self.stream = None;
-				self.watch = None;
+				self.watches.clear();
 				self.active_guild = guild;
 				self.active_session = None;
 				self.negotiation_server = None;
@@ -334,7 +340,7 @@ impl Calls {
 					self.negotiation_server = None;
 					self.session_confirmed = false;
 					self.stream = None;
-					self.watch = None;
+					self.watches.clear();
 					self.camera = false;
 				}
 				return Ok(None);
@@ -353,7 +359,7 @@ impl Calls {
 				self.departing_guild = self.active_guild;
 				self.departure_deadline = Some(Instant::now() + Duration::from_secs(10));
 				self.stream = None;
-				self.watch = None;
+				self.watches.clear();
 				self.muted = true;
 				self.deafened = true;
 				self.camera = false;
@@ -509,12 +515,9 @@ impl Calls {
 				stream_request,
 				streamer,
 			} => {
-				// Re-requesting the same stream replaces a stale attempt; a different one
-				// requires stopping first, which the viewer always sends.
-				if self
-					.watch
-					.as_ref()
-					.is_some_and(|watch| watch.streamer != streamer)
+				// Re-requesting the same stream replaces a stale attempt; other streams stay.
+				self.watches.retain(|watch| watch.streamer != streamer);
+				if self.watches.len() >= MAX_WATCHES
 					|| self.active != Some((channel, request))
 					|| self.allowed.get(&channel) != Some(&self.active_guild)
 					|| streamer.0 == 0
@@ -527,7 +530,7 @@ impl Calls {
 					|guild| format!("guild:{guild}:{channel}:{streamer}"),
 				);
 				let packet = json!({"op":20,"d":{"stream_key":key}});
-				self.watch = Some(WatchAttempt {
+				self.watches.push(WatchAttempt {
 					channel,
 					request,
 					stream_request,
@@ -542,16 +545,14 @@ impl Calls {
 				request,
 				stream_request,
 			} => {
-				let Some(watch) = &self.watch else {
+				let Some(index) = self.watches.iter().position(|watch| {
+					(watch.channel, watch.request, watch.stream_request)
+						== (channel, request, stream_request)
+				}) else {
 					return Ok(None);
 				};
-				if (watch.channel, watch.request, watch.stream_request)
-					!= (channel, request, stream_request)
-				{
-					return Ok(None);
-				}
 				// Viewers leave with the same opcode; later events for the key are ignored.
-				let key = self.watch.take().map(|watch| watch.key);
+				let key = self.watches.remove(index).key;
 				Ok(Some(Frame::Text(
 					json!({"op":19,"d":{"stream_key":key}}).to_string().into(),
 				)))
@@ -602,7 +603,7 @@ impl Calls {
 		emit: &impl Fn(Event) -> Result<(), Failure>,
 	) -> Result<(), Failure> {
 		let failed = matches!(event, screen::Event::Failed(_));
-		if let Some(watch) = &self.watch {
+		if let Some(watch) = self.watches.get(self.watch_focus) {
 			emit(Event::Voice(voice::Event::Watch {
 				channel: watch.channel,
 				request: watch.request,
@@ -611,8 +612,8 @@ impl Calls {
 				event,
 			}))?;
 		}
-		if failed {
-			self.watch = None;
+		if failed && self.watch_focus < self.watches.len() {
+			self.watches.remove(self.watch_focus);
 		}
 		Ok(())
 	}
@@ -634,14 +635,20 @@ impl Calls {
 					created.rtc_server_id,
 					created.rtc_channel_id.unwrap_or(created.rtc_server_id),
 				);
-				match self.watch.as_ref().and_then(|watch| watch.created) {
+				match self
+					.watches
+					.get(self.watch_focus)
+					.and_then(|watch| watch.created)
+				{
 					Some(previous) if previous != ids => self.emit_watch(
 						screen::Event::Failed("Discord changed the stream connection identity"),
 						emit,
 					)?,
 					Some(_) => {}
 					None => {
-						self.watch.as_mut().unwrap().created = Some(ids);
+						if let Some(watch) = self.watches.get_mut(self.watch_focus) {
+							watch.created = Some(ids);
+						}
 						self.emit_watch(
 							screen::Event::Created {
 								rtc_server: ids.0,
@@ -690,7 +697,9 @@ impl Calls {
 					.ok()
 					.and_then(|deleted| deletion_reason(deleted.reason.as_deref()));
 				self.emit_watch(screen::Event::Deleted { reason }, emit)?;
-				self.watch = None;
+				if self.watch_focus < self.watches.len() {
+					self.watches.remove(self.watch_focus);
+				}
 			}
 			_ => {}
 		}
@@ -705,18 +714,19 @@ impl Calls {
 		let Ok(key) = decode::<stream::Key>(data) else {
 			return Ok(());
 		};
-		if let Some(watch) = &self.watch
-			&& (self.active != Some((watch.channel, watch.request))
-				|| self.allowed.get(&watch.channel) != Some(&self.active_guild))
-		{
-			self.watch = None;
-		}
+		let (active, allowed) = (self.active, self.allowed.clone());
+		let guild = self.active_guild;
+		self.watches.retain(|watch| {
+			active == Some((watch.channel, watch.request))
+				&& allowed.get(&watch.channel) == Some(&guild)
+		});
 		if key.stream_key.len() <= 128
-			&& self
-				.watch
-				.as_ref()
-				.is_some_and(|watch| watch.key == key.stream_key)
+			&& let Some(index) = self
+				.watches
+				.iter()
+				.position(|watch| watch.key == key.stream_key)
 		{
+			self.watch_focus = index;
 			return self.watch_dispatch(kind, data, emit);
 		}
 		if let Some(stream) = &self.stream
@@ -724,7 +734,7 @@ impl Calls {
 				|| self.allowed.get(&stream.channel) != Some(&self.active_guild))
 		{
 			self.stream = None;
-			self.watch = None;
+			self.watches.clear();
 			return Ok(());
 		}
 		if key.stream_key.len() > 128
@@ -904,7 +914,7 @@ impl Calls {
 			self.negotiation_server = None;
 			self.session_confirmed = false;
 			self.stream = None;
-			self.watch = None;
+			self.watches.clear();
 			self.camera = false;
 			emit(Event::Voice(voice::Event::TakenOver { channel, request }))?;
 		} else if let Some(session) = &secret
@@ -947,7 +957,7 @@ impl Calls {
 			self.negotiation_server = None;
 			self.session_confirmed = false;
 			self.stream = None;
-			self.watch = None;
+			self.watches.clear();
 			self.camera = false;
 		}
 		Ok(())
@@ -988,7 +998,7 @@ impl Calls {
 						self.negotiation_server = None;
 						self.session_confirmed = false;
 						self.stream = None;
-						self.watch = None;
+						self.watches.clear();
 						self.camera = false;
 					}
 					emit(Event::Voice(voice::Event::Deleted {

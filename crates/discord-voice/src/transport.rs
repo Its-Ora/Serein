@@ -3,8 +3,8 @@ use crate::{
 	crypto::{Dave, Encryption, Identity, MAX_PACKET, MAX_SIGNAL, MODE},
 	diagnostics::{Signal, Video},
 	video_receive::{
-		DecoderQueue, Encoded, Receivers, VideoSink, has_parameter_sets, is_keyframe, offer, pli,
-		remove as remove_decoder, retain_sources, spawn_decoder,
+		DecoderQueue, Encoded, Receivers, VideoSink, has_parameter_sets, is_keyframe, nack, offer,
+		pli, remove as remove_decoder, retain_sources, spawn_decoder,
 	},
 };
 use client_core::voice::VoiceConnection;
@@ -1291,12 +1291,18 @@ async fn run_stream_inner(
 					metrics.signal(Signal::SinkWantsSent,1);
 					next_sink_wants=now+if stalled {SINK_WANTS_STALLED_INTERVAL} else {SINK_WANTS_INTERVAL};
 				}
+				if secure && let Some(crypto)=encryption.as_mut() && let Some(socket)=&udp {
+					for (media,lost) in receivers.nacks(now.into_std()) {
+						if let Some((header,body))=nack(audio_ssrc,media,&lost) {udp_failures.send(socket,&crypto.seal_rtcp(&header,&body)?,"Stream RTCP send failed")?;}
+					}
+				}
 				if secure && now>=next_pli && let Some(lost)=&lost && let Some(crypto)=encryption.as_mut() && let Some(socket)=&udp {
 					receivers.absorb(lost);
 					let requests:Vec<u32>=receivers.keyframe_requests().collect();
 					metrics.video(Video::PliSent,requests.len() as u64);
 					for media in requests {let (header,body)=pli(audio_ssrc,media);udp_failures.send(socket,&crypto.seal_rtcp(&header,&body)?,"Stream RTCP send failed")?;}
-					next_pli=now+Duration::from_millis(500);
+					// Fork: 200 ms (was 500 ms) so a lost keyframe does not hold the freeze as long.
+					next_pli=now+Duration::from_millis(200);
 				}
 				if let Some(shared)=&mut share_audio
 					&& let Some(video)=video.as_mut()
@@ -1372,7 +1378,8 @@ async fn run_stream_inner(
 				}
 				let Some(decoder)=&decoder else {continue;};
 				if rtp.payload_type!=101 {continue;}
-				let Some((user,frame))=receivers.push(rtp.ssrc,rtp.sequence,rtp.timestamp,rtp.marker,&rtp.payload) else {continue;};
+				// Fork: buffered so a lost packet can be retransmitted instead of freezing the picture.
+				for (user,frame) in receivers.push_buffered(rtp.ssrc,rtp.sequence,rtp.timestamp,rtp.marker,&rtp.payload,std::time::Instant::now()) {
 				if !dave.contains(user) {metrics.video(Video::NotReady,1);continue;}
 				let start=metrics.start();
 				let Ok(data)=dave.session.decrypt(user,davey::MediaType::VIDEO,&frame) else {receivers.require_keyframe(user);metrics.poll(false,1,false,0);metrics.video(Video::DecryptFailed,1);continue;};
@@ -1380,6 +1387,7 @@ async fn run_stream_inner(
 				if keyframe {metrics.video(Video::Keyframes,1);metrics.video(Video::KeyframesWithoutParams,u64::from(!has_parameter_sets(&data)));}
 				if !receivers.accept(user,keyframe) {metrics.video(Video::Gated,1);continue;}
 				if !offer(decoder,Encoded{user,data,keyframe})? {receivers.require_keyframe(user);metrics.poll(false,1,false,0);metrics.video(Video::QueueFull,1);} else {metrics.finish(crate::diagnostics::Stage::VideoReceive,start);}
+				}
 			},
 			event=ws.next()=>{
 				let Some(Ok(event))=event else {return Err("Discord stream socket failed");};

@@ -33,22 +33,51 @@ pub struct Settings {
 	/// Share system audio with the screen; call microphone settings are independent.
 	pub audio: bool,
 }
+/// Fork: owner-chosen stream bitrate in kbit/s; 0 keeps the automatic table.
+static BITRATE_OVERRIDE_KBPS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// Highest manual stream bitrate accepted, in Mbit/s.
+pub const MAX_MANUAL_MBPS: u32 = 80;
+
+/// Set the manual stream bitrate (Mbit/s); 0 returns to automatic. Applies to the next
+/// stream start and to the running stream's ceiling.
+pub fn set_bitrate_override(mbps: u32) {
+	BITRATE_OVERRIDE_KBPS.store(
+		mbps.min(MAX_MANUAL_MBPS) * 1000,
+		std::sync::atomic::Ordering::Relaxed,
+	);
+}
+pub fn bitrate_override_mbps() -> u32 {
+	BITRATE_OVERRIDE_KBPS.load(std::sync::atomic::Ordering::Relaxed) / 1000
+}
+
 impl Settings {
 	pub fn valid(self) -> bool {
 		!matches!(self.source, SourceId::Display(0) | SourceId::Window(0))
 			&& matches!(
 				(self.width, self.height),
-				(854, 480) | (1280, 720) | (1920, 1080)
+				(854, 480) | (1280, 720) | (1920, 1080) | (2560, 1440)
 			) && matches!(self.fps, 15 | 30 | 60)
 	}
 
+	/// Encoder ceiling. Fork: higher automatic rates (upstream's 1080p30 at 8 Mbit/s looked
+	/// soft on films and games) and an optional manual value.
 	pub fn bit_rate(self) -> u32 {
-		let base = match (self.width, self.height) {
-			(854, 480) => 2_000_000,
-			(1920, 1080) => 8_000_000,
-			_ => 4_000_000,
+		let manual = BITRATE_OVERRIDE_KBPS.load(std::sync::atomic::Ordering::Relaxed);
+		if manual > 0 {
+			return manual.saturating_mul(1000).max(500_000);
+		}
+		let base: u32 = match (self.width, self.height) {
+			(854, 480) => 3_000_000,
+			(1920, 1080) => 10_000_000,
+			(2560, 1440) => 16_000_000,
+			_ => 6_000_000,
 		};
-		(base * if self.fps == 60 { 2 } else { 1 }).min(16_000_000)
+		match self.fps {
+			60 => base / 5 * 8,
+			15 => base / 2,
+			_ => base,
+		}
+		.min(40_000_000)
 	}
 }
 

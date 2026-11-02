@@ -93,6 +93,10 @@ pub struct AppPreferences {
 	pub quiet_online: bool,
 	/// Device-local friend groups; never sent to Discord.
 	pub friend_groups: Vec<model::FriendGroup>,
+	/// Manual screen-share bitrate in Mbit/s; 0 is automatic.
+	pub stream_bitrate_mbps: u32,
+	/// Call view: hide participants who are not streaming while watching streams.
+	pub hide_non_streamers: bool,
 }
 impl Default for AppPreferences {
 	fn default() -> Self {
@@ -134,6 +138,8 @@ impl Default for AppPreferences {
 			plaintext_login: false,
 			quiet_online: false,
 			friend_groups: Vec::new(),
+			stream_bitrate_mbps: 0,
+			hide_non_streamers: false,
 		}
 	}
 }
@@ -160,6 +166,7 @@ impl AppPreferences {
 			&& self.keybinds.is_valid()
 			&& self.image_cache.is_valid()
 			&& model::friend_groups_valid(&self.friend_groups)
+			&& self.stream_bitrate_mbps <= 80
 			&& [&self.voice_input, &self.voice_output]
 				.into_iter()
 				.all(|value| value.as_ref().is_none_or(|value| value.len() <= 1024))

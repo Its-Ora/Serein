@@ -103,6 +103,35 @@ impl State {
 				|| self.permission(channel, model::permissions::USE_EXTERNAL_STICKERS)
 					== Some(true))
 	}
+	/// Fork: a sticker this account cannot attach (another server, no Nitro, no external
+	/// sticker permission) can still be shared as its image link, which Discord embeds.
+	/// Lottie stickers (format 3) have no image file and stay unavailable.
+	pub fn sticker_image_url(sticker: &Sticker) -> Option<String> {
+		let extension = match sticker.format_type {
+			1 | 2 => "png",
+			4 => "gif",
+			_ => return None,
+		};
+		Some(format!(
+			"https://media.discordapp.net/stickers/{}.{extension}?size=160",
+			sticker.id
+		))
+	}
+	pub fn can_send_sticker_as_image(&self, sticker: &Sticker) -> bool {
+		self.selected.is_some_and(|channel| self.can_send(channel))
+			&& sticker.valid()
+			&& sticker.available
+			&& Self::sticker_image_url(sticker).is_some()
+	}
+	/// Fork: share an unusable sticker as its image link where attachments are not allowed.
+	pub fn prepare_sticker_link_send(&mut self, sticker: &Sticker) -> Option<Command> {
+		if !self.can_send_sticker_as_image(sticker) {
+			self.status = "This sticker is unavailable in this conversation";
+			return None;
+		}
+		let url = Self::sticker_image_url(sticker)?;
+		self.prepare_text_send(&url)
+	}
 	pub fn prepare_sticker_send(&mut self, sticker: &Sticker) -> Option<Command> {
 		if !self.can_send_sticker(sticker) {
 			self.status = if self.sticker_requires_nitro(sticker) {

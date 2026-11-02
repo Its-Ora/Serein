@@ -6,6 +6,8 @@ use crate::{
 };
 use model::{Id, Member};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+/// Streams watched at once (fork); matches the Gateway's bound.
+pub const MAX_WATCHED: usize = 4;
 pub const MAX_PARTICIPANTS: usize = 64;
 pub const MAX_DM_CALLS: usize = 64;
 pub const MAX_DM_CALL_BYTES: usize = MAX_DM_CALLS * size_of::<Id>();
@@ -122,8 +124,9 @@ pub struct Call {
 	pub deafened: bool,
 	pub participants: Vec<Participant>,
 	pub camera: bool,
-	/// Participant whose screen share this device explicitly chose to watch.
-	pub watching: Option<Id>,
+	/// Participants whose screen shares this device explicitly chose to watch (fork: up to
+	/// `MAX_WATCHED` at once, in the order they were opened).
+	pub watching: Vec<Id>,
 	pub error: Option<&'static str>,
 	/// Automatic rejoin after joined media dropped: the attempt (1-based) and why it dropped.
 	/// Cleared once the replacement session connects.
@@ -575,7 +578,7 @@ impl ClientState {
 			muted,
 			deafened,
 			camera: false,
-			watching: None,
+			watching: Vec::new(),
 			participants,
 			error: None,
 			reconnecting: None,
@@ -600,7 +603,7 @@ impl ClientState {
 		{
 			call.phase = Phase::Connecting;
 			call.camera = false;
-			call.watching = None;
+			call.watching.clear();
 			call.reconnecting = Some((attempt, reason));
 		}
 	}
@@ -714,7 +717,8 @@ impl ClientState {
 		let own = self.user.as_ref().map(|user| user.id);
 		let call = self.voice.active.as_mut()?;
 		if !matches!(call.phase, Phase::Connected | Phase::Waiting)
-			|| call.watching == Some(streamer)
+			|| call.watching.contains(&streamer)
+			|| call.watching.len() >= MAX_WATCHED
 			|| own == Some(streamer)
 			|| !call
 				.participants
@@ -723,12 +727,19 @@ impl ClientState {
 		{
 			return None;
 		}
-		call.watching = Some(streamer);
+		call.watching.push(streamer);
 		Some(())
 	}
+	/// Stop watching every stream.
 	pub fn stop_watching(&mut self) {
 		if let Some(call) = &mut self.voice.active {
-			call.watching = None;
+			call.watching.clear();
+		}
+	}
+	/// Stop watching one stream; the others keep playing.
+	pub fn stop_watching_stream(&mut self, streamer: Id) {
+		if let Some(call) = &mut self.voice.active {
+			call.watching.retain(|watched| *watched != streamer);
 		}
 	}
 	pub fn apply_voice(&mut self, event: Event) {
@@ -891,11 +902,9 @@ impl ClientState {
 							self.voice.outgoing = None;
 						}
 						call.participants = participants.clone();
-						if call.watching.is_some_and(|user| {
-							!participants.iter().any(|p| p.user == user && p.streaming)
-						}) {
-							call.watching = None;
-						}
+						call.watching.retain(|user| {
+							participants.iter().any(|p| p.user == *user && p.streaming)
+						});
 					}
 					self.remember_dm_participants(channel, participants);
 				}
@@ -1027,8 +1036,8 @@ impl ClientState {
 					}
 					call.participants.push(participant);
 				}
-				if call.watching == Some(user) && (channel != Some(call.channel) || !streaming) {
-					call.watching = None;
+				if channel != Some(call.channel) || !streaming {
+					call.watching.retain(|watched| *watched != user);
 				}
 			}
 			Event::Progress {
@@ -1070,7 +1079,7 @@ impl ClientState {
 					self.voice.outgoing = None;
 					call.phase = Phase::Failed;
 					call.camera = false;
-					call.watching = None;
+					call.watching.clear();
 					call.reconnecting = None;
 					call.error.get_or_insert(message);
 					call.participants.clear();
@@ -1131,12 +1140,9 @@ impl ClientState {
 				call.server_muted = own.server_muted;
 				call.server_deafened = own.server_deafened;
 			}
-			if call
-				.watching
-				.is_some_and(|w| !call.participants.iter().any(|p| p.user == w && p.streaming))
-			{
-				call.watching = None;
-			}
+			let participants = &call.participants;
+			call.watching
+				.retain(|w| participants.iter().any(|p| p.user == *w && p.streaming));
 			if call.participants.len() > MAX_PARTICIPANTS {
 				self.disconnect_voice("Voice channel exceeds the 64 participant limit");
 			}
@@ -1202,7 +1208,7 @@ impl ClientState {
 		if let Some(call) = &mut self.voice.active {
 			call.phase = Phase::Failed;
 			call.camera = false;
-			call.watching = None;
+			call.watching.clear();
 			call.reconnecting = None;
 			call.error.get_or_insert(reason);
 			call.participants.clear();

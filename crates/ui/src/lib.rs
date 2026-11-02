@@ -353,6 +353,8 @@ pub struct MessagingUi {
 	pub quiet_online: bool,
 	/// Device-local friend groups shown in the Online and All friends tabs.
 	pub friend_groups: Vec<model::FriendGroup>,
+	/// Call view: while streams are watched, hide tiles of people who are not streaming.
+	pub hide_non_streamers: bool,
 	/// Latest disk use of the media and shared-artwork caches, once measured.
 	pub image_cache_usage: Option<[model::CacheUsage; 2]>,
 	/// An image cache partition the owner asked to empty; the desktop consumes it.
@@ -466,6 +468,8 @@ pub struct MessagingUi {
 	/// Decoded remote cameras by user; the desktop owns, bounds and replaces the textures.
 	pub voice_remote_video: Vec<(Id, egui::load::SizedTexture)>,
 	/// Latest picture of the screen share this device chose to watch; desktop-owned texture.
+	/// Fork: every watched stream's latest picture and status, keyed by streamer.
+	pub voice_streams: Vec<(Id, Option<egui::load::SizedTexture>, &'static str)>,
 	pub voice_stream_view: Option<egui::load::SizedTexture>,
 	pub voice_stream_status: &'static str,
 	/// Session-only stream playback level; unset is 100%. Mute preserves the level.
@@ -485,6 +489,8 @@ pub struct MessagingUi {
 	pub voice_chat_open: bool,
 	/// Tile click to start (`Some(user)`) or stop (`None`) watching, applied by the stage.
 	watch_request: Option<Option<Id>>,
+	/// Fork: stop watching just this stream; the others keep playing.
+	watch_stop: Option<Id>,
 	ring_request: Option<(Id, u64, Id, bool)>,
 	voice_moderation: Option<(Id, Id, Id, model::server_admin::VoiceChange)>,
 	stream_preview_open: Option<((Id, Id, Id), u64)>,
@@ -3579,6 +3585,22 @@ impl MessagingUi {
                                 if editing_here { state.status = "Finish or cancel the edit before sending a sticker."; }
                                 else if self.upload_busy { state.status = "Wait for the upload before sending a sticker."; }
                                 else if let Some(command) = state.prepare_sticker_send(&sticker) { self.timeline.follow_latest(state); commands.push(command); }
+                                None
+                            },
+                            Some(emoji_picker::Pick::StickerImage(sticker)) => {
+                                let asset = model::ImageShare::Sticker { id: sticker.id, format_type: sticker.format_type };
+                                if editing_here { state.status = "Finish or cancel the edit before sending a sticker."; }
+                                else if self.upload_busy || self.image_share_requested.is_some() { state.status = "Wait for the upload before sending a sticker."; }
+                                else if state.can_attach(channel) && !self.selected_files().is_empty() {
+                                    state.status = "Send or remove the attached files before sending a sticker.";
+                                } else if state.can_attach(channel) && asset.url().is_some() {
+                                    // The marker never equals a real draft, so the typed text stays.
+                                    self.image_share_requested = Some((state.generation, channel, vec![asset], "\u{1}".into()));
+                                    self.timeline.follow_latest(state);
+                                } else if let Some(command) = state.prepare_sticker_link_send(&sticker) {
+                                    self.timeline.follow_latest(state);
+                                    commands.push(command);
+                                }
                                 None
                             },
                             Some(emoji_picker::Pick::Send(url)) => {

@@ -30,9 +30,20 @@ Windows uniquement. Chaque push sur `main` publie une nouvelle release automatiq
 - Un 401 ne vide plus le token : vérification de `/users/@me`, puis reconnexion auto (30 s, 2 min, 5 min).
 - Journal : `%LOCALAPPDATA%\serein\session.log` (aucun token ni ID dedans).
 
-**Streams**
-- Les streams en 1440p, 4K et ultrawide s'affichent (avant : le son passait mais l'image restait bloquée sur « waiting for video », Serein refusait tout au-dessus de 1080p).
+**Streams (regarder)**
+- Plusieurs streams en même temps (4 max), côte à côte comme sur Discord. Le son des streams est mixé.
+- Option **Masquer les gens sans stream** (bouton volume du stream ou clic droit sur un stream).
+- Moins de freezes : un paquet perdu est redemandé (NACK) au lieu de jeter l'image et d'attendre une image clé ; demandes d'image clé toutes les 200 ms au lieu de 500.
+- 1440p, 4K et ultrawide s'affichent (avant : son OK mais image bloquée sur « waiting for video »).
 - Bascule auto vers le décodage logiciel si le décodeur GPU ne sort aucune image.
+
+**Streams (partager)**
+- 1440p disponible en plus de 480p / 720p / 1080p.
+- Débit réglable : Auto ou 8 / 12 / 20 / 30 / 50 Mb/s (gardé entre les sessions). Auto plus généreux qu'avant (1080p30 ≈ 10 Mb/s, 1440p30 ≈ 16 Mb/s, ×1,6 en 60 fps).
+- Preview de ton propre stream à 30 fps (avant : 10).
+
+**Stickers**
+- Un sticker d'un autre serveur (sans Nitro) part direct en image, sans passer par la barre de message.
 
 **Divers**
 - Mise à jour auto désactivée (elle réinstallerait la version officielle).

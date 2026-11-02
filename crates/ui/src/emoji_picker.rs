@@ -162,6 +162,8 @@ enum GifSection {
 /// What the composer does with a picked item.
 pub(crate) enum Pick {
 	Sticker(model::Sticker),
+	/// A sticker this account cannot attach natively, sent as an uploaded image.
+	StickerImage(model::Sticker),
 	/// Insert text at the caret (emoji or custom emoji markup).
 	Insert(String),
 	/// Send this GIF address as its own message right away, like Discord.
@@ -836,14 +838,8 @@ impl Picker {
 
 	fn pick_sticker(&self, state: &State, sticker: model::Sticker) -> Pick {
 		if self.images() && !state.can_send_sticker(&sticker) {
-			Pick::Insert(
-				model::ImageShare::Sticker {
-					id: sticker.id,
-					format_type: sticker.format_type,
-				}
-				.markdown(&sticker.name)
-				.unwrap_or_default(),
-			)
+			// Fork: send it right away as an image instead of an emoji-like composer link.
+			Pick::StickerImage(sticker)
 		} else {
 			Pick::Sticker(sticker)
 		}
@@ -2895,7 +2891,7 @@ mod tests {
 		state.stickers.external_allowed = false;
 		assert!(matches!(
 			picker.pick_sticker(&state, external.clone()),
-			Pick::Insert(text) if model::ImageShare::markdown_only(&text).is_some()
+			Pick::StickerImage(_)
 		));
 		state.stickers.external_allowed = true;
 		assert!(matches!(

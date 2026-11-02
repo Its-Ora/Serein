@@ -8,8 +8,8 @@ const RTP_HEADER: usize = 12;
 const TRANSPORT_OVERHEAD: usize = 20;
 // Reserve the original sequence number added by RFC 4588 retransmission.
 const MAX_PAYLOAD: usize = MTU - RTP_HEADER - TRANSPORT_OVERHEAD - 2;
-pub(crate) const MAX_FRAGMENTS: usize = 2048;
-const MAX_DAVE_FRAME: usize = 2 * 1024 * 1024 + 64 * 1024;
+pub(crate) const MAX_FRAGMENTS: usize = 4096;
+const MAX_DAVE_FRAME: usize = 4 * 1024 * 1024 + 64 * 1024;
 
 pub(crate) struct Packet {
 	pub header: [u8; RTP_HEADER],
@@ -188,8 +188,9 @@ impl Rate {
 	}
 }
 
-const HISTORY_PACKETS: usize = 2048;
-const HISTORY_BYTES: usize = 2 * 1024 * 1024;
+const HISTORY_PACKETS: usize = 6144;
+// Retransmission history: about a second of a 40 Mbit/s stream.
+const HISTORY_BYTES: usize = 6 * 1024 * 1024;
 const HISTORY_AGE: Duration = Duration::from_secs(1);
 struct Sent {
 	packet: Packet,
@@ -366,7 +367,8 @@ pub(crate) fn packetize(
 }
 
 pub(crate) fn validate_source(frame: &[u8]) -> Result<(), &'static str> {
-	if frame.len() > 2 * 1024 * 1024 {
+	// Matches screen::MAX_ENCODED_BYTES (this file is also compiled standalone by an example).
+	if frame.len() > 4 * 1024 * 1024 {
 		return Err("H264 frame exceeds the sharing limit");
 	}
 	nalus(frame).map(|_| ())

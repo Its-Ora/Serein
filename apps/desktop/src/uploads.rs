@@ -43,7 +43,8 @@ const PARKED_CONVERSATIONS: usize = 8;
 /// In-memory bytes (pasted data and thumbnails) all parked selections may keep together.
 const PARKED_BYTES: u64 = 64 * 1024 * 1024;
 const EMOJI_EDGE: u32 = 48;
-const STICKER_EDGE: u32 = 160;
+// Fork: stickers shared as images keep their full 320 px artwork.
+const STICKER_EDGE: u32 = 320;
 const ARTWORK_FRAMES: usize = 240;
 
 fn apng_delay(delay: image::Delay) -> (u16, u16) {
@@ -1607,7 +1608,7 @@ mod tests {
 			for color in [[255, 255, 0, 255], [255, 0, 255, 255]] {
 				encoder
 					.encode_frame(image::Frame::from_parts(
-						image::RgbaImage::from_pixel(320, 160, image::Rgba(color)),
+						image::RgbaImage::from_pixel(640, 320, image::Rgba(color)),
 						0,
 						0,
 						image::Delay::from_numer_denom_ms(100, 1),
@@ -1627,7 +1628,10 @@ mod tests {
 			image::codecs::gif::GifDecoder::new(std::io::Cursor::new(animated_gif)).unwrap();
 		let frames = decoder.into_frames().collect_frames().unwrap();
 		assert_eq!(frames.len(), 2);
-		assert_eq!(frames[0].buffer().dimensions(), (160, 80));
+		assert_eq!(
+			frames[0].buffer().dimensions(),
+			(STICKER_EDGE, STICKER_EDGE / 2)
+		);
 	}
 
 	#[tokio::test]

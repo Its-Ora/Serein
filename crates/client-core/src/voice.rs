@@ -294,7 +294,7 @@ pub enum Event {
 		request: u64,
 	},
 	/// Fork: a moderator moved this session to another voice channel of the same server.
-	/// Media reconnects there with the same session.
+	/// The session and media connection carry over; only the channel changes.
 	Moved {
 		from: Id,
 		to: Id,
@@ -789,11 +789,9 @@ impl ClientState {
 					&& call.request == request
 				{
 					call.channel = to;
-					call.phase = Phase::Connecting;
+					// The roster of the new channel arrives through its voice states.
 					call.participants.clear();
 					call.watching.clear();
-					call.camera = false;
-					call.reconnecting = None;
 					call.channel_started_at = None;
 					self.status = "Moved to another voice channel";
 				}

@@ -873,8 +873,9 @@ impl Calls {
 			}
 		}
 		// Fork: a moderator moved this session to another channel of the same server, even one
-		// it could not join itself. Follow it with the same session instead of treating the
-		// move as another client taking the call over (which left the call silent).
+		// it could not join itself. Discord keeps the same session and media connection, so
+		// only the channel changes here; treating it as a takeover left the call silent. A new
+		// voice server, if Discord sends one, arrives as an ordinary VOICE_SERVER_UPDATE.
 		if own
 			&& self.session_confirmed
 			&& state.guild_id.is_some()
@@ -889,23 +890,9 @@ impl Calls {
 			}) {
 			self.allowed.insert(to, state.guild_id);
 			self.active = Some((to, request));
-			self.session_confirmed = false;
 			self.stream = None;
 			self.watches.clear();
-			self.camera = false;
-			self.negotiation_revision = self.negotiation_revision.wrapping_add(1);
 			emit(Event::Voice(voice::Event::Moved { from, to, request }))?;
-			// Discord sends a new server only when the channel lives elsewhere; until then
-			// the current one stays valid for the new channel.
-			if let Some((token, Some(endpoint))) = &self.negotiation_server {
-				emit(Event::Voice(voice::Event::Server {
-					request,
-					channel: to,
-					negotiation_revision: Some(self.negotiation_revision),
-					token: Some(Secret::new(token.expose().to_owned())?),
-					endpoint: Some(endpoint.clone()),
-				}))?;
-			}
 		}
 		let allowed = state
 			.channel_id
@@ -1109,12 +1096,18 @@ impl Calls {
 					return Err(Failure::Capacity);
 				}
 				let token = Secret::new(token.to_string())?;
-				if self
+				let unchanged = self
 					.negotiation_server
 					.as_ref()
-					.is_none_or(|(old, endpoint)| {
-						old.expose() != token.expose() || *endpoint != server.endpoint
-					}) {
+					.is_some_and(|(old, endpoint)| {
+						old.expose() == token.expose() && *endpoint == server.endpoint
+					});
+				// Fork: a repeated server for a confirmed call (e.g. after a moderator move)
+				// changes nothing; re-emitting it would reconnect media for no reason.
+				if unchanged && self.session_confirmed {
+					return Ok(());
+				}
+				if !unchanged {
 					self.negotiation_revision = self.negotiation_revision.wrapping_add(1);
 					self.negotiation_server = Some((
 						Secret::new(token.expose().to_owned())?,
@@ -2119,37 +2112,55 @@ mod tests {
 				request: 5
 			})
 		));
-		// The current server is handed over for the new channel, then the same session.
+		// The session carries over; no takeover and no reconnect material.
 		assert!(matches!(
 			&events[1],
-			Event::Voice(voice::Event::Server {
-				channel: Id(21),
-				request: 5,
-				token: Some(_),
-				..
-			})
-		));
-		assert!(matches!(
-			&events[2],
 			Event::Voice(voice::Event::State {
 				channel: Some(Id(21)),
 				request: Some(5),
-				session: Some(_),
 				..
 			})
 		));
-		assert!(
-			!events
-				.iter()
-				.any(|event| matches!(event, Event::Voice(voice::Event::TakenOver { .. })))
-		);
+		assert!(!events.iter().any(|event| matches!(
+			event,
+			Event::Voice(voice::Event::TakenOver { .. } | voice::Event::Server { .. })
+		)));
 		assert_eq!(calls.active, Some((Id(21), 5)));
-		// The new transport can confirm in the new channel.
-		assert!(
-			calls
-				.confirm_session(Id(21), 5, calls.negotiation_revision)
-				.is_some()
-		);
+		assert!(calls.session_confirmed);
+		// A repeated server for the new channel changes nothing; a different one reconnects.
+		let server = |token: &str| {
+			serde_json::to_vec(&json!({"guild_id":guild,"channel_id":Id(21),"token":token,"endpoint":"synthetic.discord.media"})).unwrap()
+		};
+		let seen = Mutex::new(Vec::new());
+		let record = |event| {
+			seen.lock().unwrap().push(event);
+			Ok(())
+		};
+		calls
+			.dispatch(
+				"VOICE_SERVER_UPDATE",
+				&server("synthetic-token"),
+				Some(Id(1)),
+				&record,
+			)
+			.unwrap();
+		assert!(seen.lock().unwrap().is_empty());
+		calls
+			.dispatch(
+				"VOICE_SERVER_UPDATE",
+				&server("other-token"),
+				Some(Id(1)),
+				&record,
+			)
+			.unwrap();
+		assert!(matches!(
+			&seen.lock().unwrap()[0],
+			Event::Voice(voice::Event::Server {
+				channel: Id(21),
+				request: 5,
+				..
+			})
+		));
 	}
 
 	#[test]

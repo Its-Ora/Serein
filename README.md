@@ -44,7 +44,7 @@ Windows uniquement. Chaque push sur `main` publie une nouvelle release automatiq
 - Preview de ton propre stream à 30 fps (avant : 10).
 
 **Vocal**
-- Quand un modo te déplace dans un autre salon (même un salon où tu n'as pas le droit d'aller), Serein te suit : même session, le son et la vidéo se reconnectent dans le nouveau salon. Avant, l'appel devenait muet et le bouton « Rejoindre » restait affiché.
+- Quand un modo te déplace dans un autre salon (même un salon où tu n'as pas le droit d'aller), Serein te suit sans couper le son : la connexion vocale est gardée, seul le salon change. Si Discord change de serveur vocal, Serein se reconnecte avec la même session. Avant, l'appel devenait muet et le bouton « Rejoindre » restait affiché.
 
 **Stickers**
 - Un sticker d'un autre serveur (sans Nitro) part direct en image, sans passer par la barre de message.

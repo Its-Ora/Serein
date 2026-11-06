@@ -1,7 +1,7 @@
 # Serein · fork Its-Ora
 
 Fork perso de [Serein](https://github.com/ViceVerse-cz/Serein), client Discord natif en Rust.
-Ce README ne liste que ce qui change par rapport au client de base.
+Ce README ne liste que ce qui change par rapport au client de base. Le fork suit les mises à jour officielles (dernière fusion : novembre 2026).
 
 ## Télécharger
 
@@ -33,18 +33,17 @@ Windows uniquement. Chaque push sur `main` publie une nouvelle release automatiq
 **Streams (regarder)**
 - Plusieurs streams en même temps (4 max), côte à côte comme sur Discord. Le son des streams est mixé.
 - Option **Masquer les gens sans stream** (bouton volume du stream ou clic droit sur un stream).
-- Moins de freezes : un paquet perdu est redemandé (NACK) au lieu de jeter l'image et d'attendre une image clé ; demandes d'image clé toutes les 200 ms au lieu de 500.
 - 1440p, 4K et ultrawide s'affichent (avant : son OK mais image bloquée sur « waiting for video »).
 - Bascule auto vers le décodage logiciel si le décodeur GPU ne sort aucune image.
 
 **Streams (partager)**
 - Débit toujours au maximum accepté par Discord (≈ 10 Mb/s), quelle que soit la résolution ; il ne baisse que si le réseau sature. Avant : 2 à 8 Mb/s selon la résolution.
 - Résolutions : 480p, 720p, **936p** (1664×936, le meilleur compromis à 10 Mb/s), 1080p.
-- Fréquences : 15, **23,976 (film)**, 30, 60, **120 fps** (120 demande un écran à 120 Hz ou plus).
-- Preview de ton propre stream à 30 fps (avant : 10).
+- Fréquences : 15, **23,976 (film)**, 30, 60, 90, 120 fps (90 et 120 demandent un écran assez rapide).
 
 **Vocal**
 - Quand un modo te déplace dans un autre salon (même un salon où tu n'as pas le droit d'aller), Serein te suit sans couper le son : la connexion vocale est gardée, seul le salon change. Si Discord change de serveur vocal, Serein se reconnecte avec la même session. Avant, l'appel devenait muet et le bouton « Rejoindre » restait affiché.
+- Plus de vocal bloqué : si un appel échoue alors que Discord t'a déjà mis dans un salon, Serein te fait vraiment quitter ce salon (avant, il oubliait l'appel de son côté seulement : tu entendais les autres, sans pouvoir parler, quitter ni rejoindre un autre vocal). Rejoindre un autre salon pendant qu'un vieil appel traîne bascule directement dessus au lieu d'être refusé.
 
 **Stickers**
 - Un sticker d'un autre serveur (sans Nitro) part direct en image, sans passer par la barre de message.

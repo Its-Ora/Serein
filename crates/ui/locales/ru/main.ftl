@@ -51,8 +51,10 @@ general-start-minimized = Начать сворачивать
 general-start-minimized-description = Начните в фоновом режиме, подальше от вас.
 general-startup-unavailable = Автоматический запуск доступен в Windows и macOS.
 general-window = Окно
-general-hide-decorations = Скрыть украшения на окнах
-general-hide-decorations-description = Удалите строку заголовка и границы системы. Используйте оконный менеджер, чтобы переместить, изменить размер или закрыть Serein.
+general-hide-decorations = Без заголовка окна
+general-hide-decorations-description = Для тайловых оконных менеджеров: убирает все заголовки и рамки, включая собственный заголовок Serein. Перемещайте, изменяйте размер и закрывайте Serein средствами оконного менеджера.
+general-custom-title-bar = Собственный заголовок окна
+general-custom-title-bar-description = Заменяет системную строку заголовка собственной панелью заголовка Serein в стиле GTK 4.
 general-hide-title-bar = Скрыть строку заголовка Серейн
 general-hide-title-bar-description = Вместо этого используйте системную строку заголовка и кнопки окна.
 general-keep-menu-bar = Держите Серейн в строке меню
@@ -65,6 +67,8 @@ general-graphics = Графика
 general-render-with = Рендеринг с помощью
 general-gpu-restart = Изменение этого параметра вступает в силу после перезапуска.
 general-gpu-current-prefix = Сейчас активна
+general-steady-refresh-rate = Постоянная частота обновления
+general-steady-refresh-rate-description = Пока окно Serein активно, отрисовка идёт с частотой обновления экрана, поэтому мониторы с переменной частотой обновления (VRR, G-SYNC, FreeSync) могут держать одну частоту и не мерцать. Расходует больше энергии.
 gpu-automatic = Автоматический
 gpu-high-performance = Высокая производительность
 gpu-power-saving = Экономия энергии
@@ -85,7 +89,6 @@ hide-chat = Скрыть чат
 show-chat = Показать чат
 search-conversation = Искать этот разговор
 show-member-list = Показать список участников
-show-user-profile = Показать профиль пользователя
 pinned-messages = Закрепленные сообщения
 threads = Темы
 
@@ -1537,6 +1540,14 @@ join-server-status-invite-accepted = Приглашение принято. Ож
 join-server-status-offline-preview = Офлайн-просмотр — присоединение к серверам отключено.
 
 ## crates/ui/src/keybinds.rs
+# Context: custom_row
+keybinds-custom-row-remove = Удалить
+# Context: custom_section
+keybinds-custom-section-add-binding = Добавить сочетание
+# Context: custom_section
+keybinds-custom-section-add-extra-shortcuts-for-any-action-each-key-or-mouse-button-combination-can-only-be-used-once = Добавьте дополнительные сочетания для любого действия. Каждую комбинацию клавиши или кнопки мыши можно использовать только один раз.
+# Context: custom_section
+keybinds-custom-section-custom-bindings = Свои сочетания
 # Context: row
 keybinds-row-global = ГЛОБАЛЬНЫЙ
 # Context: row
@@ -1777,6 +1788,10 @@ notification-settings-notification-settings-for-per-channel-or-per-server-notifi
 notification-settings-notification-settings-open = Открыть
 # Context: notification_settings
 notification-settings-notification-settings-preview-sound = Предварительный просмотр звука
+# Context: notification_settings
+notification-settings-notification-settings-push-to-talk-activate = Нажмите, чтобы поговорить: включение
+# Context: notification_settings
+notification-settings-notification-settings-push-to-talk-deactivate = Нажмите, чтобы поговорить: выключение
 # Context: notification_settings
 notification-settings-notification-settings-ringtones-call-devices-and-microphone-processing = Рингтоны, устройства вызова и обработка микрофона.
 # Context: notification_settings
@@ -2243,6 +2258,12 @@ screen-body-frame-rate = Частота кадров
 screen-body-include-the-pointer-in-the-shared-video = Включите указатель в общедоступное видео.
 # Context: body
 screen-body-quality = Качество
+# Context: body
+screen-body-source = Источник
+# Context: body
+screen-preview-paused-title = Ваша трансляция всё ещё идёт!
+# Context: body
+screen-preview-paused-body = Мы приостановили этот предпросмотр, чтобы сэкономить ресурсы.
 # Context: body
 screen-body-quality-selection-does-not-require-nitro = Качественный отбор не требует нитро.
 # Context: body
@@ -3986,7 +4007,29 @@ updates-update-settings-restart-to-update = Перезапустите, чтоб
 # Context: update_settings
 updates-update-settings-serein-was-installed-via-your-distribution-run-this-in-a = Serein был установлен через пакетный менеджер. Используйте эту команду для обновления.
 # Context: update_settings
+updates-update-settings-save-diagnostics = Сохранить диагностику
+# Context: update_settings
 updates-update-settings-support-diagnostics = Поддержка и диагностика
+# Context: update_settings
+updates-update-settings-copy-recent-lines = Скопировать последние строки
+# Context: update_settings
+updates-update-settings-diagnostic-log = Диагностический журнал
+# Context: update_settings
+updates-update-settings-log-errors = Ошибки
+# Context: update_settings
+updates-update-settings-log-events = Ошибки, предупреждения и события
+# Context: update_settings
+updates-update-settings-log-everything = Всё (подробно)
+# Context: update_settings
+updates-update-settings-log-off = Выключен
+# Context: update_settings
+updates-update-settings-log-warnings = Ошибки и предупреждения
+# Context: update_settings
+updates-update-settings-open-folder = Открыть папку
+# Context: update_settings
+updates-update-settings-the-log-folder-could-not-be-written = Не удалось записать папку журнала. Проверьте папку данных Serein и повторите попытку.
+# Context: update_settings
+updates-update-settings-timings-stages-and-failures-in-one-local-file-no-account-channel-or = Тайминги, этапы и сбои в одном локальном файле журнала. Данные аккаунта, каналов, сообщений и учётные данные не записываются, и ничего не отправляется.
 # Context: update_log
 updates-update-log = Журнал обновлений
 # Context: update_settings
@@ -4462,6 +4505,7 @@ lib-composer-onboarding-incomplete = Завершите вступление, ч
 lib-composer-onboarding-complete = Завершить знакомство
 profiles-message-placeholder = Сообщение @{ $user }
 profiles-message-send = Отправить сообщение
+profiles-message-open-chat = Открыть чат
 profiles-message-sending = Открытие личных сообщений…
 user-menu-contents-start-a-call = Начать звонок
 verification-show-complete-the-check-to-open-this-conversation = Пройдите проверку, чтобы открыть этот разговор.
@@ -4746,6 +4790,9 @@ timeline-group-intro = Добро пожаловать в начало груп�
 timeline-channel-intro-title = Добро пожаловать в #{ $channel }!
 # Context: timeline_channel_intro
 timeline-channel-intro-start = Это начало канала #{ $channel }.
+show-user-profile = Показать профиль пользователя
+hide-user-profile = Скрыть профиль пользователя
+view-full-profile = Открыть полный профиль
 # Context: text_menu
 text-menu-cut = Вырезать
 text-menu-copy = Копировать

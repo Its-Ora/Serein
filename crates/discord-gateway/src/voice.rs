@@ -313,11 +313,14 @@ impl Calls {
 				..
 			} => {
 				let guild = *self.allowed.get(&channel).ok_or(Failure::Protocol)?;
-				// A rejoin replaces this channel's dropped media session in place, so Discord
-				// sends fresh voice credentials without the call ever leaving the channel.
-				if self.active.is_some_and(|(active, _)| active != channel)
-					|| self.departing.is_some()
-				{
+				// A join for a channel this account is already in changes nothing on Discord's
+				// side and returns no voice credentials, so a rejoin leaves first and comes back
+				// through this branch only once the departure is confirmed.
+				// Fork: a join for another channel while an old call lingers here switches to it,
+				// as Discord's own client does with one opcode 4. Core only asks once its own call
+				// is over, so the lingering one is stale; refusing it soft-locked voice after a
+				// failed moderator move.
+				if self.departing.is_some() {
 					return Err(Failure::Protocol);
 				}
 				self.active = Some((channel, request));
@@ -333,6 +336,12 @@ impl Calls {
 				(Some(channel), guild)
 			}
 			Command::AbandonSession { channel, request } => {
+				// Fork: once Discord has placed this session in the channel, forgetting it here
+				// alone leaves the account connected there with no way to leave from this
+				// client. Leave on Discord's side instead.
+				if self.active == Some((channel, request)) && self.active_session.is_some() {
+					return self.packet(Command::Leave { channel, request });
+				}
 				if self.active == Some((channel, request)) {
 					self.active = None;
 					self.active_guild = None;
@@ -347,6 +356,13 @@ impl Calls {
 			}
 			Command::Leave { channel, request } => {
 				if self.active != Some((channel, request)) {
+					// A repeated leave for a call that is already departing still reaches
+					// Discord: the first acknowledgement may have been lost, and a second opcode 4
+					// with no channel is harmless.
+					if self.departing == Some((channel, request)) {
+						self.departure_deadline = Some(Instant::now() + Duration::from_secs(10));
+						return Ok(Some(self.state_frame(None, self.departing_guild)));
+					}
 					return Ok(None);
 				}
 				self.departing = self.active.take();
@@ -714,6 +730,24 @@ impl Calls {
 		let Ok(key) = decode::<stream::Key>(data) else {
 			return Ok(());
 		};
+		// A stream in this call names its owner even when this device neither streams nor
+		// watches it; private calls give no `self_stream` on their participants. A creation
+		// needs the joined call, while a deletion also clears the retained membership of a
+		// call this device already left.
+		if let Some((guild, channel, user)) = key.target()
+			&& guild.is_none()
+			&& self.allowed.get(&channel) == Some(&None)
+			&& match kind {
+				"STREAM_CREATE" => self.active.is_some_and(|(active, _)| active == channel),
+				"STREAM_DELETE" => true,
+				_ => false,
+			} {
+			emit(Event::Voice(voice::Event::ParticipantStream {
+				channel,
+				user,
+				streaming: kind == "STREAM_CREATE",
+			}))?;
+		}
 		let (active, allowed) = (self.active, self.allowed.clone());
 		let guild = self.active_guild;
 		self.watches.retain(|watch| {
@@ -1835,6 +1869,44 @@ mod tests {
 				.is_none()
 		);
 		assert_eq!(calls.active, Some((Id(20), 5))); // Stale local cancellation cannot clear a newer attempt.
+		// Fork: Discord already placed this session in the channel, so abandoning it must
+		// leave there too, or the account stays connected with no way out of the call.
+		assert!(
+			calls
+				.packet(Command::AbandonSession {
+					channel: Id(20),
+					request: 5
+				})
+				.unwrap()
+				.is_some()
+		);
+		assert!(calls.active.is_none() && calls.active_session.is_none());
+		assert_eq!(calls.departing, Some((Id(20), 5)));
+		calls
+			.dispatch(
+				"VOICE_STATE_UPDATE",
+				br#"{"channel_id":null,"user_id":"1","session_id":"synthetic-session"}"#,
+				Some(Id(1)),
+				&emit,
+			)
+			.unwrap();
+		assert!(calls.departing.is_none() && calls.departure_deadline.is_none());
+		assert!(calls.confirm_session(Id(20), 5, previous).is_none());
+		assert!(calls.packet(join(6)).unwrap().is_some());
+	}
+	#[test]
+	fn abandon_before_discord_places_the_session_stays_local() {
+		let mut calls = Calls::default();
+		calls.allowed.insert(Id(20), None);
+		calls
+			.packet(Command::Join {
+				channel: Id(20),
+				request: 5,
+				ring: false,
+				mute: false,
+				deaf: false,
+			})
+			.unwrap();
 		assert!(
 			calls
 				.packet(Command::AbandonSession {
@@ -1844,31 +1916,23 @@ mod tests {
 				.unwrap()
 				.is_none()
 		);
-		assert!(
-			!calls.has_call()
-				&& calls.active_session.is_none()
-				&& calls.negotiation_server.is_none()
-		);
-		assert!(calls.departing.is_none() && calls.departure_deadline.is_none());
-		events.lock().unwrap().clear();
-		calls
-			.dispatch(
-				"VOICE_STATE_UPDATE",
-				br#"{"channel_id":"20","user_id":"1","session_id":"late-session"}"#,
-				Some(Id(1)),
-				&emit,
-			)
-			.unwrap();
-		assert!(matches!(
-			events.lock().unwrap()[0],
-			Event::Voice(voice::Event::State {
-				request: None,
-				session: None,
-				..
-			})
-		));
-		assert!(calls.confirm_session(Id(20), 5, previous).is_none());
-		assert!(calls.packet(join(6)).unwrap().is_some());
+		assert!(!calls.has_call() && calls.departing.is_none());
+	}
+	#[test]
+	fn join_elsewhere_replaces_a_lingering_call_instead_of_refusing() {
+		let mut calls = Calls::default();
+		calls.allowed.insert(Id(20), Some(Id(10)));
+		calls.allowed.insert(Id(30), Some(Id(10)));
+		let join = |channel, request| Command::Join {
+			channel,
+			request,
+			ring: false,
+			mute: false,
+			deaf: false,
+		};
+		calls.packet(join(Id(20), 5)).unwrap();
+		assert!(calls.packet(join(Id(30), 6)).unwrap().is_some());
+		assert_eq!(calls.active, Some((Id(30), 6)));
 	}
 	#[test]
 	fn another_client_takes_over_without_a_hangup_or_stale_departure_barrier() {
@@ -2694,5 +2758,102 @@ mod tests {
 			&emit,
 		).unwrap();
 		assert_eq!(events.lock().unwrap().len(), 4);
+	}
+
+	#[test]
+	fn a_private_call_stream_names_its_owner_for_the_sound_cue() {
+		let mut calls = Calls::default();
+		calls.allowed.insert(Id(20), None);
+		calls
+			.packet(Command::Join {
+				channel: Id(20),
+				request: 7,
+				ring: false,
+				mute: false,
+				deaf: false,
+			})
+			.unwrap();
+		let events = Mutex::new(Vec::new());
+		let emit = |event| {
+			events.lock().unwrap().push(event);
+			Ok(())
+		};
+		// Another participant's stream is announced by its key: private calls do not set
+		// `self_stream` on their participants, so the live badge and cue need this event.
+		calls
+			.dispatch(
+				"STREAM_CREATE",
+				br#"{"stream_key":"call:20:2","rtc_server_id":"30","rtc_channel_id":"31"}"#,
+				Some(Id(1)),
+				&emit,
+			)
+			.unwrap();
+		assert!(matches!(
+			events.lock().unwrap().pop().unwrap(),
+			Event::Voice(voice::Event::ParticipantStream {
+				channel: Id(20),
+				user: Id(2),
+				streaming: true,
+			})
+		));
+		// Another conversation's stream and a viewer refresh say nothing about this call.
+		for (kind, data) in [
+			("STREAM_CREATE", br#"{"stream_key":"call:21:2"}"#.as_slice()),
+			("STREAM_DELETE", br#"{"stream_key":"call:21:2"}"#.as_slice()),
+			(
+				"STREAM_UPDATE",
+				br#"{"stream_key":"call:20:2","viewer_ids":[]}"#.as_slice(),
+			),
+		] {
+			calls.dispatch(kind, data, Some(Id(1)), &emit).unwrap();
+			assert!(events.lock().unwrap().is_empty(), "{kind}");
+		}
+		calls
+			.dispatch(
+				"STREAM_DELETE",
+				br#"{"stream_key":"call:20:2"}"#,
+				Some(Id(1)),
+				&emit,
+			)
+			.unwrap();
+		assert!(matches!(
+			events.lock().unwrap().pop().unwrap(),
+			Event::Voice(voice::Event::ParticipantStream {
+				channel: Id(20),
+				user: Id(2),
+				streaming: false,
+			})
+		));
+		// Leaving the call keeps the channel as an allowed private conversation: a later
+		// deletion still clears the retained share, while a creation needs the joined call.
+		calls.active = None;
+		calls
+			.dispatch(
+				"STREAM_DELETE",
+				br#"{"stream_key":"call:20:2"}"#,
+				Some(Id(1)),
+				&emit,
+			)
+			.unwrap();
+		assert!(matches!(
+			events.lock().unwrap().pop().unwrap(),
+			Event::Voice(voice::Event::ParticipantStream {
+				channel: Id(20),
+				user: Id(2),
+				streaming: false,
+			})
+		));
+		calls
+			.dispatch(
+				"STREAM_CREATE",
+				br#"{"stream_key":"call:20:2","rtc_server_id":"30","rtc_channel_id":"31"}"#,
+				Some(Id(1)),
+				&emit,
+			)
+			.unwrap();
+		assert!(
+			events.lock().unwrap().is_empty(),
+			"a creation needs the joined call"
+		);
 	}
 }

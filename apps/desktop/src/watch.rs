@@ -14,6 +14,8 @@ use tokio::{runtime::Runtime, sync::watch, task::JoinHandle};
 use zeroize::Zeroizing;
 
 const SIGNAL_TIMEOUT: Duration = Duration::from_secs(30);
+// Eight UHD YUV pictures plus the displayed picture fit without increasing the item bound.
+const DECODED_BUDGET: usize = 128 * 1024 * 1024;
 
 /// Latest stream picture and whether the UI still has to upload it.
 type Slot = Option<(platform::video::Picture, bool)>;
@@ -39,6 +41,72 @@ fn store_frame(slot: &mut Slot, frame: discord_voice::RemoteFrame<'_>) -> bool {
 	true
 }
 
+// Decode early, display on the audio/device clock. Only decoded pictures may be
+// skipped here: the H.264 decoder has already consumed their reference state.
+#[derive(Default)]
+struct Scheduled {
+	latest: Slot,
+	pending: std::collections::VecDeque<(platform::video::Picture, discord_voice::Presentation)>,
+	bytes: usize,
+}
+impl Scheduled {
+	fn store(&mut self, frame: discord_voice::RemoteFrame<'_>) -> bool {
+		let Some(presentation) = frame.presentation.clone() else {
+			return store_frame(&mut self.latest, frame);
+		};
+		if !presentation.is_current() || !frame.picture.is_valid() {
+			return false;
+		}
+		let length = frame.picture.data.len();
+		if length > DECODED_BUDGET {
+			return false;
+		}
+		let old = if self.latest.as_ref().is_some_and(|(_, fresh)| !*fresh) {
+			self.latest.take()
+		} else {
+			None
+		};
+		let mut data = old.map(|(picture, _)| picture.data).unwrap_or_default();
+		if data.capacity() > length.saturating_mul(4) {
+			data = Vec::new();
+		}
+		let required = data.capacity().max(length);
+		while self.pending.len() >= 8
+			|| self.bytes
+				+ required + self
+				.latest
+				.as_ref()
+				.map_or(0, |(picture, _)| picture.data.capacity())
+				> DECODED_BUDGET
+		{
+			let Some((old, _)) = self.pending.pop_front() else {
+				return false;
+			};
+			self.bytes -= old.data.capacity();
+		}
+		data.clear();
+		data.reserve_exact(length);
+		data.extend_from_slice(frame.picture.data);
+		self.bytes += data.capacity();
+		self.pending
+			.push_back((frame.picture.with_data(data), presentation));
+		true
+	}
+	fn advance(&mut self, now: Instant) -> Option<Instant> {
+		while let Some((_, stamp)) = self.pending.front() {
+			if stamp.is_current() && stamp.deadline(now) > now {
+				return Some(stamp.deadline(now));
+			}
+			let (picture, stamp) = self.pending.pop_front().expect("front exists");
+			self.bytes -= picture.data.capacity();
+			if stamp.is_current() {
+				self.latest = Some((picture, true));
+			}
+		}
+		None
+	}
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Context {
 	generation: u64,
@@ -53,7 +121,7 @@ struct Pending {
 	peer: Option<Id>,
 	session: Zeroizing<String>,
 	identity: Arc<Identity>,
-	audio: Option<std::sync::mpsc::SyncSender<discord_voice::Frame>>,
+	audio: Option<std::sync::mpsc::SyncSender<discord_voice::PlaybackFrame>>,
 	rtc: Option<(Id, Id)>,
 	server: Option<(voice::Secret, String)>,
 	started: Instant,
@@ -67,7 +135,7 @@ struct Live {
 	context: Context,
 	task: JoinHandle<()>,
 	events: watch::Receiver<Option<Notice>>,
-	frames: Arc<Mutex<Slot>>,
+	frames: Arc<Mutex<Scheduled>>,
 }
 
 /// One watched stream's picture and status for the UI.
@@ -105,7 +173,7 @@ impl Watch {
 		ui: &mut ui::MessagingUi,
 		ctx: &egui::Context,
 		call: Option<super::screen::Call<'_>>,
-		audio: Option<std::sync::mpsc::SyncSender<discord_voice::Frame>>,
+		audio: Option<std::sync::mpsc::SyncSender<discord_voice::PlaybackFrame>>,
 	) -> Option<Command> {
 		let wanted: Vec<(u64, Id, u64, Id)> = state
 			.voice
@@ -170,74 +238,107 @@ impl Watch {
 }
 
 /// Each watched stream's audio input, shared with the mixing thread.
-type MixInputs = Arc<Mutex<Vec<(Id, std::sync::mpsc::Receiver<discord_voice::Frame>)>>>;
+type MixInputs = Arc<Mutex<Vec<(Id, std::sync::mpsc::Receiver<discord_voice::PlaybackFrame>)>>>;
 
-/// Sums each watched stream's 20 ms audio frames into the call's stream-audio input.
+/// Routes watched streams' audio into the call's single stream-audio input.
+///
+/// With one stream playing, each frame is forwarded untouched and at once, so the
+/// presentation timing that keeps sound and picture in sync is preserved. With several, one
+/// frame from each playing stream is summed into the first stream's frame, which keeps that
+/// frame's presentation timing.
 struct Mixer {
 	inputs: MixInputs,
-	senders: Vec<(Id, std::sync::mpsc::SyncSender<discord_voice::Frame>)>,
+	senders: Vec<(
+		Id,
+		std::sync::mpsc::SyncSender<discord_voice::PlaybackFrame>,
+	)>,
 	stop: Arc<std::sync::atomic::AtomicBool>,
 }
 impl Mixer {
-	fn start(out: std::sync::mpsc::SyncSender<discord_voice::Frame>) -> Self {
+	fn start(out: std::sync::mpsc::SyncSender<discord_voice::PlaybackFrame>) -> Self {
 		let inputs: MixInputs = Arc::default();
 		let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
 		let (thread_inputs, thread_stop) = (inputs.clone(), stop.clone());
 		let _ = std::thread::Builder::new()
 			.name("serein-stream-mix".into())
 			.spawn(move || {
-				const FRAME: Duration = Duration::from_millis(20);
-				// Up to ~100 ms buffered per stream absorbs scheduling jitter.
-				let mut queues: Vec<(Id, std::collections::VecDeque<discord_voice::Frame>)> =
-					Vec::new();
-				let mut next = Instant::now();
+				// A stream that sent nothing for this long no longer holds the others back.
+				const IDLE: Duration = Duration::from_millis(120);
+				struct Queue {
+					id: Id,
+					frames: std::collections::VecDeque<discord_voice::PlaybackFrame>,
+					last: Instant,
+				}
+				let mut queues: Vec<Queue> = Vec::new();
 				while !thread_stop.load(std::sync::atomic::Ordering::Acquire) {
+					let now = Instant::now();
 					if let Ok(inputs) = thread_inputs.lock() {
-						queues.retain(|(id, _)| inputs.iter().any(|(input, _)| input == id));
+						queues.retain(|queue| inputs.iter().any(|(id, _)| *id == queue.id));
 						for (id, receiver) in inputs.iter() {
-							let index = match queues.iter().position(|(queue, _)| queue == id) {
+							let index = match queues.iter().position(|queue| queue.id == *id) {
 								Some(index) => index,
 								None => {
-									queues.push((*id, Default::default()));
+									queues.push(Queue {
+										id: *id,
+										frames: Default::default(),
+										last: now,
+									});
 									queues.len() - 1
 								}
 							};
+							let queue = &mut queues[index];
 							while let Ok(frame) = receiver.try_recv() {
-								let queue = &mut queues[index].1;
-								if queue.len() >= 5 {
-									queue.pop_front();
+								if queue.frames.len() >= 8 {
+									queue.frames.pop_front();
 								}
-								queue.push_back(frame);
+								queue.frames.push_back(frame);
+								queue.last = now;
 							}
 						}
 					}
-					let mut mixed: Option<discord_voice::Frame> = None;
-					for (_, queue) in &mut queues {
-						if let Some(frame) = queue.pop_front() {
-							let sum = mixed.get_or_insert([0.0; 960]);
-							for (out, sample) in sum.iter_mut().zip(frame.iter()) {
+					loop {
+						let playing: Vec<usize> = (0..queues.len())
+							.filter(|index| now.duration_since(queues[*index].last) < IDLE)
+							.collect();
+						// Mix only once every playing stream has a frame (or one stream plays).
+						if playing.is_empty()
+							|| playing.iter().any(|index| queues[*index].frames.is_empty())
+						{
+							break;
+						}
+						let mut frames = playing
+							.iter()
+							.filter_map(|index| queues[*index].frames.pop_front());
+						let Some(mut mixed) = frames.next() else {
+							break;
+						};
+						let mut summed = false;
+						for frame in frames {
+							summed = true;
+							for (out, sample) in mixed.samples.iter_mut().zip(frame.samples.iter())
+							{
 								*out += sample;
 							}
 						}
-					}
-					if let Some(mut frame) = mixed {
-						for sample in &mut frame {
-							*sample = sample.clamp(-1.0, 1.0);
+						if summed {
+							for sample in &mut mixed.samples {
+								*sample = sample.clamp(-1.0, 1.0);
+							}
 						}
 						if matches!(
-							out.try_send(frame),
+							out.try_send(mixed),
 							Err(std::sync::mpsc::TrySendError::Disconnected(_))
 						) {
-							break;
+							return;
 						}
 					}
-					next += FRAME;
-					let now = Instant::now();
-					if next > now {
-						std::thread::sleep(next - now);
-					} else {
-						next = now;
+					// Idle queues keep only recent audio so a returning stream starts in sync.
+					for queue in &mut queues {
+						if now.duration_since(queue.last) >= IDLE {
+							queue.frames.clear();
+						}
 					}
+					std::thread::sleep(Duration::from_millis(2));
 				}
 			});
 		Self {
@@ -247,7 +348,7 @@ impl Mixer {
 		}
 	}
 	/// This stream's audio sender, created on first use.
-	fn input(&mut self, streamer: Id) -> std::sync::mpsc::SyncSender<discord_voice::Frame> {
+	fn input(&mut self, streamer: Id) -> std::sync::mpsc::SyncSender<discord_voice::PlaybackFrame> {
 		if let Some((_, sender)) = self.senders.iter().find(|(id, _)| *id == streamer) {
 			return sender.clone();
 		}
@@ -370,7 +471,7 @@ impl Single {
 		ui: &mut ui::MessagingUi,
 		ctx: &egui::Context,
 		call: Option<super::screen::Call<'_>>,
-		audio: Option<std::sync::mpsc::SyncSender<discord_voice::Frame>>,
+		audio: Option<std::sync::mpsc::SyncSender<discord_voice::PlaybackFrame>>,
 		// The separate stream transport survives call rekeys and voice resumption.
 		wanted: Option<(u64, Id, u64, Id)>,
 		sequence: &mut u64,
@@ -499,13 +600,20 @@ impl Single {
 			}
 			// Uploading copies the planes into GPU staging, so it runs under the slot lock
 			// and the decoder keeps refilling the same allocation.
-			if let Ok(mut slot) = live.frames.try_lock()
-				&& let Some((picture, fresh)) = slot.as_mut()
-				&& std::mem::take(fresh)
-				&& let Some(texture) = self.texture.upload(ctx, "remote-stream", picture.borrow())
-			{
-				self.status = "Watching the stream";
-				view.0 = Some(texture);
+			if let Ok(mut slot) = live.frames.try_lock() {
+				if let Some(deadline) = slot.advance(Instant::now()) {
+					ctx.request_repaint_after(deadline.saturating_duration_since(Instant::now()));
+				}
+				if let Some((picture, fresh)) = slot.latest.as_mut()
+					&& std::mem::take(fresh)
+					&& let Some(texture) =
+						self.texture.upload(ctx, "remote-stream", picture.borrow())
+				{
+					self.status = "Watching the stream";
+					view.0 = Some(texture);
+				} else {
+					view.0 = self.texture.texture();
+				}
 			} else {
 				view.0 = self.texture.texture();
 			}
@@ -535,7 +643,7 @@ impl Single {
 			endpoint,
 			request: pending.context.stream_request,
 		};
-		let frames = Arc::new(Mutex::new(None));
+		let frames = Arc::new(Mutex::new(Scheduled::default()));
 		let slot = frames.clone();
 		let wake = ctx.clone();
 		let streamer = pending.context.streamer.0;
@@ -543,10 +651,7 @@ impl Single {
 			if frame.user != streamer {
 				return;
 			}
-			if slot
-				.lock()
-				.is_ok_and(|mut slot| store_frame(&mut slot, frame))
-			{
+			if slot.lock().is_ok_and(|mut slot| slot.store(frame)) {
 				wake.request_repaint();
 			}
 		});
@@ -629,7 +734,7 @@ mod tests {
 						context,
 						task: runtime.spawn(std::future::pending()),
 						events,
-						frames: Arc::new(Mutex::new(None)),
+						frames: Arc::new(Mutex::new(Scheduled::default())),
 					}),
 					ended: None,
 					status: "",
@@ -669,6 +774,7 @@ mod tests {
 
 	fn frame(width: u32, height: u32, data: &[u8]) -> discord_voice::RemoteFrame<'_> {
 		discord_voice::RemoteFrame {
+			presentation: None,
 			user: 7,
 			picture: platform::video::Picture {
 				width,
@@ -750,5 +856,44 @@ mod tests {
 		let (picture, _) = slot.take().unwrap();
 		assert_eq!(picture.data.len(), 1920 * 1080 * 3 / 2);
 		assert!(picture.data.capacity() <= 1920 * 1080 * 3 / 2);
+	}
+	#[test]
+	fn decoded_stream_pictures_wait_for_presentation_and_pressure_skips_only_decoded_frames() {
+		let now = Instant::now();
+		let mut queue = Scheduled::default();
+		let pixels = i420(3840, 2160, 4);
+		for n in 0..16 {
+			let mut picture = frame(3840, 2160, &pixels);
+			picture.presentation = Some(discord_voice::Presentation::new(
+				now + Duration::from_millis(100 + n * 16),
+			));
+			assert!(queue.store(picture));
+		}
+		assert_eq!(queue.pending.len(), 8);
+		assert!(queue.bytes <= DECODED_BUDGET);
+		assert!(queue.latest.is_none());
+		assert_eq!(queue.advance(now), Some(now + Duration::from_millis(228)));
+		queue.advance(now + Duration::from_millis(260));
+		assert_eq!(queue.pending.len(), 5);
+		assert!(queue.latest.as_ref().unwrap().1);
+		assert!(queue.bytes + queue.latest.as_ref().unwrap().0.data.capacity() <= DECODED_BUDGET);
+		drop(queue);
+		// A backend's RGBA fallback reaches the byte bound before the eight-picture bound.
+		let mut queue = Scheduled::default();
+		let pixels = vec![4; 3840 * 2160 * 4];
+		for n in 0..16 {
+			let mut picture = frame(3840, 2160, &pixels);
+			picture.picture.layout = platform::video::Layout::Rgba;
+			picture.presentation = Some(discord_voice::Presentation::new(
+				now + Duration::from_millis(100 + n * 16),
+			));
+			assert!(queue.store(picture));
+		}
+		assert_eq!(queue.pending.len(), 4);
+		assert!(queue.bytes <= DECODED_BUDGET);
+		queue.advance(now + Duration::from_secs(1));
+		assert!(queue.pending.is_empty());
+		assert_eq!(queue.bytes, 0);
+		assert!(queue.latest.as_ref().unwrap().1);
 	}
 }

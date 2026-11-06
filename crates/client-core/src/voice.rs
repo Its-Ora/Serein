@@ -84,7 +84,8 @@ pub struct Participant {
 	pub server_deafened: bool,
 	/// Camera on (`self_video`); frames arrive on the call transport.
 	pub video: bool,
-	/// Go Live screen share announced (`self_stream`); viewing needs an explicit watch.
+	/// Go Live screen share announced: `self_stream`, or a private call's stream key. Viewing
+	/// still needs an explicit watch.
 	pub streaming: bool,
 }
 #[derive(Clone)]
@@ -318,6 +319,13 @@ pub enum Event {
 	Deleted {
 		channel: Id,
 	},
+	/// A stream in the active call started or ended, announced by its stream key. Private calls
+	/// carry no `self_stream` on their participants, so this is their live signal.
+	ParticipantStream {
+		channel: Id,
+		user: Id,
+		streaming: bool,
+	},
 	ChannelStarted {
 		guild: Id,
 		channel: Id,
@@ -532,7 +540,15 @@ impl ClientState {
 		})
 	}
 	pub fn can_camera(&self, channel: Id) -> bool {
-		self.can_call(channel) && self.permission(channel, model::permissions::STREAM) == Some(true)
+		self.gateway_connected && self.has_camera_access(channel)
+	}
+	/// Whether an already-established local camera remains permitted to capture media.
+	/// New camera activation must still use `can_camera`, which also requires a live Gateway.
+	pub fn has_camera_access(&self, channel: Id) -> bool {
+		!self.demo
+			&& self.auth == AuthState::Authenticated
+			&& self.has_voice_access(channel)
+			&& self.permission(channel, model::permissions::STREAM) == Some(true)
 	}
 	pub fn start_call(&mut self, channel: Id, ring: bool) -> Option<crate::Command> {
 		self.start_call_with_mute(channel, ring, false, false)
@@ -544,7 +560,16 @@ impl ClientState {
 		muted: bool,
 		deafened: bool,
 	) -> Option<crate::Command> {
-		if !self.can_call(channel) || self.voice.active.is_some() {
+		if !self.can_call(channel) {
+			return None;
+		}
+		// A failed call is not a live one: joining again replaces it instead of being refused.
+		if self
+			.voice
+			.active
+			.as_ref()
+			.is_some_and(|call| call.phase != Phase::Failed)
+		{
 			return None;
 		}
 		let guild = self.channel(channel)?.guild;
@@ -573,6 +598,8 @@ impl ClientState {
 		let request = self.voice.sequence;
 		self.voice.outgoing = ring.then_some((channel, request, false));
 		self.voice.ring_error = None;
+		// A join puts this account back in the channel; an older departure must not outlive it.
+		self.voice.departed = None;
 		self.voice.active = Some(Call {
 			channel,
 			guild,
@@ -628,6 +655,9 @@ impl ClientState {
 		let muted = call.muted || !self.can_speak(call.channel);
 		self.voice.sequence = self.voice.sequence.wrapping_add(1);
 		let request = self.voice.sequence;
+		// The join puts this account back in the channel, so an earlier departure record must not
+		// let a later rejoin skip the leave that makes its join a real one.
+		self.voice.departed = None;
 		let call = self.voice.active.as_mut()?;
 		call.request = request;
 		call.muted = muted;
@@ -911,6 +941,20 @@ impl ClientState {
 				}
 				if let Some(mut participants) = participants {
 					participants.shrink_to_fit();
+					// The snapshot carries no private share state; keep what the stream keys
+					// announced, also for a call this device has not joined.
+					if let Some((_, retained)) = self
+						.voice
+						.dm_participants
+						.iter()
+						.find(|(id, _)| *id == channel)
+					{
+						for participant in &mut participants {
+							participant.streaming |= retained.iter().any(|previous| {
+								previous.user == participant.user && previous.streaming
+							});
+						}
+					}
 					if let Some(call) = &mut self.voice.active
 						&& call.channel == channel
 					{
@@ -995,6 +1039,25 @@ impl ClientState {
 					if channel.is_some_and(|channel| !self.dm_call_participant(channel, user)) {
 						return;
 					}
+					// A private call announces a share with its stream key, not with
+					// `self_stream`, so a mute or camera update keeps the announced state.
+					let known_streaming = channel
+						.and_then(|channel| {
+							self.voice
+								.dm_participants
+								.iter()
+								.find(|(id, _)| *id == channel)
+						})
+						.and_then(|(_, participants)| {
+							participants
+								.iter()
+								.find(|participant| participant.user == user)
+						})
+						.is_some_and(|participant| participant.streaming);
+					let participant = Participant {
+						streaming: participant.streaming || known_streaming,
+						..participant
+					};
 					// DM voice states arrive whether or not this device has joined; keep the
 					// known call membership current so a later join shows everyone.
 					for (id, participants) in &mut self.voice.dm_participants {
@@ -1044,7 +1107,15 @@ impl ClientState {
 					call.server_muted = server_muted;
 					call.server_deafened = server_deafened;
 				}
+				let previous_streaming = call
+					.participants
+					.iter()
+					.find(|participant| participant.user == user)
+					.is_some_and(|participant| participant.streaming);
 				call.participants.retain(|p| p.user != user);
+				// Private calls carry no `self_stream`; keep what their stream key announced.
+				let streaming =
+					participant.streaming || (call.guild.is_none() && previous_streaming);
 				if channel == Some(call.channel) {
 					if self.user.as_ref().is_some_and(|own| own.id != user) {
 						self.voice.outgoing = None;
@@ -1054,10 +1125,46 @@ impl ClientState {
 						self.status = "Voice channel exceeds the 64 participant limit";
 						return;
 					}
-					call.participants.push(participant);
+					call.participants.push(Participant {
+						streaming,
+						..participant
+					});
 				}
 				if channel != Some(call.channel) || !streaming {
 					call.watching.retain(|watched| *watched != user);
+				}
+			}
+			Event::ParticipantStream {
+				channel,
+				user,
+				streaming,
+			} => {
+				// A stream key is the only live signal a private call gives for its participants.
+				if let Some(call) = &mut self.voice.active
+					&& call.channel == channel
+				{
+					if let Some(participant) = call
+						.participants
+						.iter_mut()
+						.find(|participant| participant.user == user)
+					{
+						participant.streaming = streaming;
+					}
+					if !streaming {
+						call.watching.retain(|watched| *watched != user);
+					}
+				}
+				// Keep the retained call membership current, so a later join shows it too.
+				for (known, participants) in &mut self.voice.dm_participants {
+					if *known != channel {
+						continue;
+					}
+					if let Some(participant) = participants
+						.iter_mut()
+						.find(|participant| participant.user == user)
+					{
+						participant.streaming = streaming;
+					}
 				}
 			}
 			Event::Progress {
@@ -1298,6 +1405,30 @@ mod tests {
 		};
 		crate::tests::grant_permissions(&mut state);
 		state
+	}
+
+	#[test]
+	fn a_failed_call_does_not_block_joining_the_channel_again() {
+		let mut state = stream_preview_state();
+		assert!(state.start_call(Id(20), false).is_some());
+		let request = state.voice.active.as_ref().unwrap().request;
+		// The call fails while Discord still has this account in the channel; its card stays up.
+		state.apply_voice(Event::Failed {
+			channel: Id(20),
+			request,
+			message: "Audio devices are unavailable",
+		});
+		assert_eq!(state.voice.active.as_ref().unwrap().phase, Phase::Failed);
+		// Joining again replaces the failed card instead of being refused, and the old reason
+		// does not follow the new attempt.
+		assert!(
+			state.start_call(Id(20), false).is_some(),
+			"a failed call is replaceable"
+		);
+		let call = state.voice.active.as_ref().unwrap();
+		assert_eq!(call.phase, Phase::Connecting);
+		assert_ne!(call.request, request, "the new attempt has its own request");
+		assert!(call.error.is_none());
 	}
 
 	#[test]
@@ -2425,5 +2556,111 @@ mod tests {
 				assert_eq!(state.outgoing_ring(), None, "{end} must consume the intent");
 			}
 		}
+	}
+
+	#[test]
+	fn a_private_call_stream_survives_participant_updates_until_it_ends() {
+		let mut state = dm_state();
+		state.start_call(Id(2), false).unwrap();
+		let peer = Participant {
+			user: Id(3),
+			muted: false,
+			deafened: false,
+			server_muted: false,
+			server_deafened: false,
+			video: false,
+			streaming: false,
+		};
+		let call = state.voice.active.as_mut().unwrap();
+		call.participants = vec![peer];
+		call.watching = vec![Id(3)];
+		state.voice.dm_participants = vec![(Id(2), vec![peer])];
+		state.apply_voice(Event::ParticipantStream {
+			channel: Id(2),
+			user: Id(3),
+			streaming: true,
+		});
+		assert!(state.voice.active.as_ref().unwrap().participants[0].streaming);
+
+		// A private call carries no `self_stream`; a mute update must not end the share.
+		state.apply_voice(Event::State {
+			guild: None,
+			member: None,
+			server_muted: false,
+			server_deafened: false,
+			request: None,
+			channel: Some(Id(2)),
+			user: Id(3),
+			session: None,
+			negotiation_revision: None,
+			muted: true,
+			deafened: false,
+			video: false,
+			streaming: false,
+		});
+		let call = state.voice.active.as_ref().unwrap();
+		assert!(
+			call.participants[0].streaming,
+			"a mute keeps the announced stream"
+		);
+		assert_eq!(call.watching, [Id(3)], "a mute keeps the stream's watcher");
+		assert!(state.voice.dm_participants[0].1[0].streaming);
+
+		// A call snapshot carries no stream state either.
+		state.apply_voice(Event::Call {
+			channel: Id(2),
+			ringing: None,
+			participants: Some(vec![Participant {
+				muted: true,
+				..peer
+			}]),
+			unavailable: false,
+		});
+		assert!(
+			state.voice.active.as_ref().unwrap().participants[0].streaming,
+			"a call snapshot keeps the announced stream"
+		);
+		assert!(state.voice.dm_participants[0].1[0].streaming);
+
+		// The stream key is what ends it.
+		state.apply_voice(Event::ParticipantStream {
+			channel: Id(2),
+			user: Id(3),
+			streaming: false,
+		});
+		let call = state.voice.active.as_ref().unwrap();
+		assert!(!call.participants[0].streaming);
+		assert!(
+			call.watching.is_empty(),
+			"a stream that stopped cannot stay watched"
+		);
+		// Another conversation's stream leaves this call alone.
+		state.apply_voice(Event::ParticipantStream {
+			channel: Id(9),
+			user: Id(3),
+			streaming: true,
+		});
+		assert!(!state.voice.active.as_ref().unwrap().participants[0].streaming);
+
+		// A stream that started before this device left is still announced after rejoining.
+		state.apply_voice(Event::ParticipantStream {
+			channel: Id(2),
+			user: Id(3),
+			streaming: true,
+		});
+		state.voice.active = None;
+		state.voice.departed = None;
+		state.start_call(Id(2), false).unwrap();
+		assert!(
+			state
+				.voice
+				.active
+				.as_ref()
+				.unwrap()
+				.participants
+				.iter()
+				.any(|participant| participant.user == Id(3) && participant.streaming),
+			"a rejoined call keeps the retained stream"
+		);
 	}
 }

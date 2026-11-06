@@ -51,8 +51,10 @@ general-start-minimized = Küçültülmüş başlangıç
 general-start-minimized-description = Arka planda başlayın, yolunuzdan çekilin.
 general-startup-unavailable = Otomatik başlatma Windows ve macOS'ta mevcuttur.
 general-window = Pencere
-general-hide-decorations = Pencere dekorasyonlarını gizle
-general-hide-decorations-description = Sistem başlık çubuğunu ve kenarlıklarını kaldırın. Serein'i taşımak, yeniden boyutlandırmak veya kapatmak için pencere yöneticinizi kullanın.
+general-hide-decorations = Başlık çubuğu yok
+general-hide-decorations-description = Döşemeli pencere yöneticileri için: Serein'in kendi başlık çubuğu dahil tüm başlık çubuklarını ve kenarlıkları kaldırır. Serein'i taşımak, yeniden boyutlandırmak veya kapatmak için pencere yöneticinizi kullanın.
+general-custom-title-bar = Özel başlık çubuğu
+general-custom-title-bar-description = Sistem başlık çubuğunu Serein'in GTK 4 tarzındaki kendi başlık çubuğuyla değiştirir.
 general-hide-title-bar = Serein başlık çubuğunu gizle
 general-hide-title-bar-description = Bunun yerine sistem başlık çubuğunu ve pencere düğmelerini kullanın.
 general-keep-menu-bar = Serein'i menü çubuğunda tutun
@@ -65,6 +67,8 @@ general-graphics = Grafik
 general-render-with = Şununla oluştur:
 general-gpu-restart = Serein'in bir sonraki başlangıcında etkili olur.
 general-gpu-current-prefix = Şu anda çizim yapıyorum
+general-steady-refresh-rate = Sabit yenileme hızı
+general-steady-refresh-rate-description = Serein etkin pencereyken ekranın yenileme hızında çizer; böylece değişken yenileme hızlı (VRR, G-SYNC, FreeSync) ekranlar titremek yerine tek bir hızda kalabilir. Daha fazla güç tüketir.
 gpu-automatic = Otomatik
 gpu-high-performance = Yüksek performans
 gpu-power-saving = Güç tasarrufu
@@ -85,7 +89,6 @@ hide-chat = Sohbeti gizle
 show-chat = Sohbeti göster
 search-conversation = Bu görüşmeyi arayın
 show-member-list = Üye listesini göster
-show-user-profile = Kullanıcı profilini göster
 pinned-messages = Sabitlenmiş mesajlar
 threads = Konular
 
@@ -1537,6 +1540,14 @@ join-server-status-invite-accepted = Davet kabul edildi. Sunucu erişimi bekleni
 join-server-status-offline-preview = Çevrimdışı önizleme — sunuculara katılma devre dışı bırakıldı.
 
 ## crates/ui/src/keybinds.rs
+# Context: custom_row
+keybinds-custom-row-remove = Kaldır
+# Context: custom_section
+keybinds-custom-section-add-binding = Kısayol ekle
+# Context: custom_section
+keybinds-custom-section-add-extra-shortcuts-for-any-action-each-key-or-mouse-button-combination-can-only-be-used-once = Her eylem için ek kısayollar ekleyin. Her tuş veya fare düğmesi kombinasyonu yalnızca bir kez kullanılabilir.
+# Context: custom_section
+keybinds-custom-section-custom-bindings = Özel kısayollar
 # Context: row
 keybinds-row-global = KÜRESEL
 # Context: row
@@ -1777,6 +1788,10 @@ notification-settings-notification-settings-for-per-channel-or-per-server-notifi
 notification-settings-notification-settings-open = Aç
 # Context: notification_settings
 notification-settings-notification-settings-preview-sound = Sesi Önizle
+# Context: notification_settings
+notification-settings-notification-settings-push-to-talk-activate = Konuşmak için bas: başlat
+# Context: notification_settings
+notification-settings-notification-settings-push-to-talk-deactivate = Konuşmak için bas: bitir
 # Context: notification_settings
 notification-settings-notification-settings-ringtones-call-devices-and-microphone-processing = Zil sesleri, çağrı cihazları ve mikrofon işleme.
 # Context: notification_settings
@@ -2243,6 +2258,12 @@ screen-body-frame-rate = Kare hızı
 screen-body-include-the-pointer-in-the-shared-video = İşaretçiyi paylaşılan videoya ekleyin.
 # Context: body
 screen-body-quality = Kalite
+# Context: body
+screen-body-source = Kaynak
+# Context: body
+screen-preview-paused-title = Yayınınız hâlâ devam ediyor!
+# Context: body
+screen-preview-paused-body = Kaynaklarınızı korumak için bu önizlemeyi duraklattık.
 # Context: body
 screen-body-quality-selection-does-not-require-nitro = Kaliteli seçim Nitro gerektirmez.
 # Context: body
@@ -3976,7 +3997,29 @@ updates-update-settings-restart-to-update = Güncellemek için yeniden başlatı
 # Context: update_settings
 updates-update-settings-serein-was-installed-via-your-distribution-run-this-in-a = Serein dağıtımınız aracılığıyla kuruldu. Güncellemek için bunu bir terminalde çalıştırın.
 # Context: update_settings
+updates-update-settings-save-diagnostics = Tanılamayı kaydet
+# Context: update_settings
 updates-update-settings-support-diagnostics = Destek ve teşhis
+# Context: update_settings
+updates-update-settings-copy-recent-lines = Son satırları kopyala
+# Context: update_settings
+updates-update-settings-diagnostic-log = Tanılama günlüğü
+# Context: update_settings
+updates-update-settings-log-errors = Hatalar
+# Context: update_settings
+updates-update-settings-log-events = Hatalar, uyarılar ve olaylar
+# Context: update_settings
+updates-update-settings-log-everything = Her şey (ayrıntılı)
+# Context: update_settings
+updates-update-settings-log-off = Kapalı
+# Context: update_settings
+updates-update-settings-log-warnings = Hatalar ve uyarılar
+# Context: update_settings
+updates-update-settings-open-folder = Klasörü aç
+# Context: update_settings
+updates-update-settings-the-log-folder-could-not-be-written = Günlük klasörü yazılamadı. Serein'in veri klasörünü denetleyip yeniden deneyin.
+# Context: update_settings
+updates-update-settings-timings-stages-and-failures-in-one-local-file-no-account-channel-or = Süreler, aşamalar ve hatalar tek bir yerel günlük dosyasında. Hesap, kanal, mesaj ve kimlik bilgileri asla yazılmaz ve hiçbir şey yüklenmez.
 # Context: update_log
 updates-update-log = Güncelleme günlüğü
 # Context: update_settings
@@ -4442,6 +4485,7 @@ lib-composer-onboarding-incomplete = Daha fazla kanalın kilidini açmak için s
 lib-composer-onboarding-complete = Tanıtımı tamamla
 profiles-message-placeholder = @{ $user } kullanıcısına mesaj
 profiles-message-send = Mesaj gönder
+profiles-message-open-chat = Sohbeti aç
 profiles-message-sending = Direkt mesaj açılıyor…
 user-menu-contents-start-a-call = Arama başlat
 verification-show-complete-the-check-to-open-this-conversation = Bu sohbeti açmak için doğrulamayı tamamla.
@@ -4729,6 +4773,9 @@ timeline-group-intro = { $name } grubunun başlangıcına hoş geldiniz.
 timeline-channel-intro-title = #{ $channel } kanalına hoş geldin!
 # Context: timeline_channel_intro
 timeline-channel-intro-start = #{ $channel } kanalının başlangıcı.
+show-user-profile = Kullanıcı profilini göster
+hide-user-profile = Kullanıcı profilini gizle
+view-full-profile = Tam profili görüntüle
 # Context: text_menu
 text-menu-cut = Kes
 text-menu-copy = Kopyala

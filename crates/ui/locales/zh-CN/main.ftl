@@ -51,8 +51,10 @@ general-start-minimized = 最小化启动
 general-start-minimized-description = 在背景启动，不占用你的屏幕。
 general-startup-unavailable = 自动启动仅支持 Windows 和 macOS。
 general-window = 窗口
-general-hide-decorations = 隐藏窗口装饰
-general-hide-decorations-description = 拿掉系统标题列与边框，改用窗口管理员来移动、调整大小或关闭 Serein。
+general-hide-decorations = 无标题栏
+general-hide-decorations-description = 适用于平铺式窗口管理器：移除所有标题栏与边框，包括 Serein 自己的标题栏。请用窗口管理器移动、调整大小或关闭 Serein。
+general-custom-title-bar = 自定义标题列
+general-custom-title-bar-description = 以 Serein 自己的 GTK 4 风格标题列取代系统标题列。
 general-hide-title-bar = 隐藏 Serein 标题列
 general-hide-title-bar-description = 改用系统标题列与窗口按钮。
 general-keep-menu-bar = 让 Serein 留在菜单栏
@@ -65,6 +67,8 @@ general-graphics = 图形
 general-render-with = 渲染方式
 general-gpu-restart = 下次启动 Serein 时生效。
 general-gpu-current-prefix = 目前绘制使用
+general-steady-refresh-rate = 固定刷新率
+general-steady-refresh-rate-description = 当 Serein 是活动窗口时，会以显示器的刷新率绘制，让可变刷新率（VRR、G-SYNC、FreeSync）显示器可以保持同一刷新率而不会闪烁。会更耗电。
 gpu-automatic = 自动
 gpu-high-performance = 高性能
 gpu-power-saving = 省电
@@ -85,7 +89,6 @@ hide-chat = 隐藏聊天
 show-chat = 显示聊天
 search-conversation = 搜索这个对话
 show-member-list = 显示成员清单
-show-user-profile = 显示用户资料
 pinned-messages = 置顶的消息
 threads = 帖子
 
@@ -1552,6 +1555,14 @@ join-server-status-invite-accepted = 邀请已接受。等待访问服务器。
 join-server-status-offline-preview = 离线预览：加入服务器已禁用。
 
 ## crates/ui/src/keybinds.rs
+# Context: custom_row
+keybinds-custom-row-remove = 移除
+# Context: custom_section
+keybinds-custom-section-add-binding = 添加绑定
+# Context: custom_section
+keybinds-custom-section-add-extra-shortcuts-for-any-action-each-key-or-mouse-button-combination-can-only-be-used-once = 为任意操作添加额外的快捷键。每个按键或鼠标按钮组合只能使用一次。
+# Context: custom_section
+keybinds-custom-section-custom-bindings = 自定义绑定
 # Context: row
 keybinds-row-global = 全局
 # Context: row
@@ -1792,6 +1803,10 @@ notification-settings-notification-settings-for-per-channel-or-per-server-notifi
 notification-settings-notification-settings-open = 开启
 # Context: notification_settings
 notification-settings-notification-settings-preview-sound = 预览音效
+# Context: notification_settings
+notification-settings-notification-settings-push-to-talk-activate = 按住说话：开始
+# Context: notification_settings
+notification-settings-notification-settings-push-to-talk-deactivate = 按住说话：结束
 # Context: notification_settings
 notification-settings-notification-settings-ringtones-call-devices-and-microphone-processing = 铃声、通话设备与麦克风处理。
 # Context: notification_settings
@@ -2273,6 +2288,12 @@ screen-body-frame-rate = 帧率
 screen-body-include-the-pointer-in-the-shared-video = 分享画面时包含鼠标指针。
 # Context: body
 screen-body-quality = 品质
+# Context: body
+screen-body-source = 源
+# Context: body
+screen-preview-paused-title = 你的直播仍在进行！
+# Context: body
+screen-preview-paused-body = 我们已暂停此预览以节省资源。
 # Context: body
 screen-body-quality-selection-does-not-require-nitro = 选择品质不需要 Nitro。
 # Context: body
@@ -4014,7 +4035,29 @@ updates-update-settings-restart-to-update = 重启以更新
 # Context: update_settings
 updates-update-settings-serein-was-installed-via-your-distribution-run-this-in-a = Serein 是以发行版方式安装的。请在终端中执行此命令更新。
 # Context: update_settings
+updates-update-settings-save-diagnostics = 保存诊断信息
+# Context: update_settings
 updates-update-settings-support-diagnostics = 支持与诊断
+# Context: update_settings
+updates-update-settings-copy-recent-lines = 复制最近几行
+# Context: update_settings
+updates-update-settings-diagnostic-log = 诊断日志
+# Context: update_settings
+updates-update-settings-log-errors = 错误
+# Context: update_settings
+updates-update-settings-log-events = 错误、警告与事件
+# Context: update_settings
+updates-update-settings-log-everything = 全部（详细）
+# Context: update_settings
+updates-update-settings-log-off = 关闭
+# Context: update_settings
+updates-update-settings-log-warnings = 错误与警告
+# Context: update_settings
+updates-update-settings-open-folder = 打开文件夹
+# Context: update_settings
+updates-update-settings-the-log-folder-could-not-be-written = 无法写入日志文件夹。请检查 Serein 的数据文件夹后重试。
+# Context: update_settings
+updates-update-settings-timings-stages-and-failures-in-one-local-file-no-account-channel-or = 耗时、阶段与失败记录在单个本地日志文件中。绝不写入账户、频道、消息与凭据数据，也不会上传任何内容。
 # Context: update_log
 updates-update-log = 更新日志
 # Context: update_settings
@@ -4502,6 +4545,7 @@ lib-composer-onboarding-incomplete = 完成加入这个服务器，才能解锁�
 lib-composer-onboarding-complete = 完成新手引导
 profiles-message-placeholder = 发送消息给 @{ $user }
 profiles-message-send = 发送消息
+profiles-message-open-chat = 打开聊天
 profiles-message-sending = 正在打开私信…
 user-menu-contents-start-a-call = 开始通话
 verification-show-complete-the-check-to-open-this-conversation = 完成验证后才能打开这个对话。
@@ -4841,6 +4885,9 @@ timeline-group-intro = 欢迎来到 { $name } 群组的开端。
 timeline-channel-intro-title = 欢迎来到 #{ $channel }！
 # Context: timeline_channel_intro
 timeline-channel-intro-start = 这是 #{ $channel } 频道的开头。
+show-user-profile = 显示用户资料
+hide-user-profile = 隐藏用户资料
+view-full-profile = 查看完整资料
 # Context: text_menu
 text-menu-cut = 剪切
 text-menu-copy = 复制

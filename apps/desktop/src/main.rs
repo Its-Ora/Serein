@@ -5,6 +5,8 @@ mod app_settings;
 mod audio;
 mod avatars;
 mod cache;
+#[cfg(all(debug_assertions, feature = "demo"))]
+mod camera_gateway_demo;
 mod captcha;
 #[cfg(feature = "demo")]
 mod channel_demo;
@@ -46,6 +48,8 @@ mod reading_settings;
 mod registered_games;
 #[cfg(feature = "demo")]
 mod rendering_demo;
+#[cfg(target_os = "linux")]
+mod round_corners;
 mod screen;
 #[cfg(feature = "demo")]
 mod server_settings_demo;
@@ -104,6 +108,46 @@ fn load_login_identity(dir: &std::path::Path) {
 }
 
 fn main() -> eframe::Result {
+	let camera_gateway_check = std::env::args().any(|arg| arg == "--demo-check-camera-gateway");
+	let camera_gateway_capture = std::env::args().any(|arg| {
+		arg == "--demo-camera-gateway-evidence"
+			|| arg.starts_with("--demo-camera-gateway-evidence=")
+	});
+	if camera_gateway_check || camera_gateway_capture {
+		let args: Vec<String> = std::env::args().collect();
+		if !args.iter().any(|arg| arg == "--demo") {
+			eprintln!(
+				"Camera Gateway evidence requires --demo; no application startup was attempted."
+			);
+			std::process::exit(2);
+		}
+		#[cfg(all(debug_assertions, feature = "demo"))]
+		{
+			if camera_gateway_check && camera_gateway_capture {
+				eprintln!("Choose either the offline check or native evidence capture.");
+				std::process::exit(2);
+			}
+			if camera_gateway_check {
+				camera_gateway_demo::check();
+				return Ok(());
+			}
+			let output = args
+				.iter()
+				.find_map(|arg| arg.strip_prefix("--demo-camera-gateway-evidence="))
+				.filter(|path| !path.is_empty())
+				.map(std::path::PathBuf::from)
+				.unwrap_or_else(|| {
+					eprintln!("Evidence output path must not be empty.");
+					std::process::exit(2);
+				});
+			return camera_gateway_demo::capture(output);
+		}
+		#[cfg(not(all(debug_assertions, feature = "demo")))]
+		{
+			eprintln!("Camera Gateway evidence requires a debug build with --features demo.");
+			std::process::exit(2);
+		}
+	}
 	platform::memory::tune_allocator();
 	// Fork: why sessions end, so silent logouts can be explained (%LOCALAPPDATA%\serein).
 	if let Ok(dir) = local_store::data_dir() {
@@ -349,6 +393,7 @@ fn main() -> eframe::Result {
 					tertiary_color: None,
 					position: 1,
 					hoist: false,
+					managed: false,
 					bits: 0,
 				},
 			}),
@@ -509,18 +554,40 @@ fn main() -> eframe::Result {
 	} else {
 		local_store::LocalStore::open_default().and_then(|store| store.app_preferences())
 	};
-	let (gpu_preference, transparency_available, hide_window_decorations, window_geometry) =
-		preferences
-			.as_ref()
-			.map(|value| {
-				(
-					value.gpu_preference,
-					value.transparency_blur,
-					value.hide_window_decorations,
-					value.window_geometry,
-				)
-			})
-			.unwrap_or_default();
+	// The owner's saved log level takes effect before the window, so an early defect leaves a
+	// trace instead of a description that has to be reconstructed afterwards.
+	let log_directory = local_store::data_dir().ok().map(|root| root.join("logs"));
+	if !demo && let (Some(directory), Ok(saved)) = (&log_directory, &preferences) {
+		diagnostics::install(saved.diagnostics_log, directory.clone());
+	}
+	diagnostics::record_fields(
+		diagnostics::Category::App,
+		diagnostics::Level::Info,
+		"started",
+		&[
+			("version", env!("CARGO_PKG_VERSION").into()),
+			("os", std::env::consts::OS.into()),
+			("arch", std::env::consts::ARCH.into()),
+		],
+	);
+	let (
+		gpu_preference,
+		transparency_available,
+		hide_window_decorations,
+		window_geometry,
+		custom_title_bar,
+	) = {
+		// First launch has no saved preferences; use their defaults (custom title bar on).
+		let defaults = local_store::AppPreferences::default();
+		let value = preferences.as_ref().unwrap_or(&defaults);
+		(
+			value.gpu_preference,
+			value.transparency_blur,
+			value.hide_window_decorations || value.custom_title_bar,
+			value.window_geometry,
+			cfg!(target_os = "linux") && value.custom_title_bar,
+		)
+	};
 	#[cfg(feature = "demo")]
 	let transparency_available =
 		transparency_available || demo && std::env::args().any(|arg| arg == "--demo-transparency");
@@ -531,7 +598,8 @@ fn main() -> eframe::Result {
 	let options = eframe::NativeOptions {
 		viewport: {
 			let builder = egui::ViewportBuilder::default()
-				.with_transparent(transparency_available)
+				// The custom Linux title bar needs alpha for its rounded corners.
+				.with_transparent(transparency_available || custom_title_bar)
 				.with_inner_size(
 					window_geometry
 						.map_or(app_settings::DEFAULT_WINDOW_SIZE, |geometry| geometry.size)
@@ -575,8 +643,10 @@ fn main() -> eframe::Result {
 					instance_descriptor: {
 						let mut descriptor =
 							eframe::wgpu::InstanceDescriptor::new_without_display_handle_from_env();
+						// DX12 alone offers WARP on hardware that predates it and hides the GPU's
+						// OpenGL driver; ranking prefers a real GPU, so both are enumerated.
 						descriptor.backends = eframe::wgpu::Backends::from_env()
-							.unwrap_or(eframe::wgpu::Backends::DX12);
+							.unwrap_or(eframe::wgpu::Backends::DX12 | eframe::wgpu::Backends::GL);
 						// An HWND swapchain is always opaque; only a DirectComposition one carries
 						// alpha to the desktop and its acrylic backdrop. The env override still wins.
 						if transparency_available
@@ -994,6 +1064,8 @@ impl SessionEnd {
 		self == Self::Logout
 	}
 }
+/// Window placement, scale, monitor size and focus; any change re-reads the monitor's refresh rate.
+type MonitorKey = (Option<egui::Rect>, Option<f32>, Option<egui::Vec2>, bool);
 struct Desktop {
 	proxy_auth: proxy_auth::Authentication,
 	api_proxy: tokio::sync::watch::Sender<Option<discord_api::proxy::ApiProxy>>,
@@ -1033,9 +1105,13 @@ struct Desktop {
 	cached_history_request: Option<(model::Id, u64)>,
 	/// The saved maximized state still has to be re-applied once the window is shown.
 	maximize_after_show: bool,
-	monitor_geometry: Option<(Option<egui::Rect>, Option<f32>, Option<egui::Vec2>)>,
+	monitor_geometry: Option<MonitorKey>,
 	monitor_period: Option<Duration>,
 	frame_metrics: FrameMetrics,
+	/// The minimum last handed to winit; applying an unchanged one forces a frame on Windows.
+	window_minimum: Option<winit::dpi::PhysicalSize<u32>>,
+	/// A sampled placement waiting to remain unchanged for the rest interval.
+	geometry_rest: app_settings::GeometryRest,
 	#[cfg(feature = "demo")]
 	rendering_demo: Option<rendering_demo::RenderingDemo>,
 	avatars: Option<avatars::AvatarWorker>,
@@ -1089,6 +1165,14 @@ struct Desktop {
 	current_login: Option<Arc<SessionSecret>>,
 	/// The plaintext fallback choice last handed to the credential worker.
 	plaintext_login: bool,
+	/// Where the opt-in diagnostic log belongs, resolved once so a Settings change needs no lookup.
+	log_directory: Option<std::path::PathBuf>,
+	/// Whether the first frame has reported the start-up install's result to the settings page.
+	log_verified: bool,
+	/// Whether the system refused this process the shell, so the folder button copies instead.
+	log_open_refused: bool,
+	/// A diagnostics file being written after the owner picked a destination.
+	diagnostics_save: Option<std::sync::mpsc::Receiver<Option<Result<std::path::PathBuf, ()>>>>,
 	/// Active/per-account fallback saves waiting for bounded credential-queue capacity.
 	plaintext_save_pending: [bool; 2],
 	account_presences: std::collections::BTreeMap<model::Id, model::OwnPresence>,
@@ -1129,6 +1213,19 @@ struct Desktop {
 	#[cfg(feature = "demo")]
 	synthetic_id: u64,
 	token_input: Zeroizing<String>,
+}
+/// Records the few session and gateway milestones that explain a reconnect. Payloads, identifiers
+/// and credentials never reach the log: only fixed labels and the event's own kind.
+fn log_session_event(event: &Event) {
+	use diagnostics::{Category, Level};
+	let (category, level, label) = match event {
+		Event::Startup(_) => (Category::Session, Level::Info, "session started"),
+		Event::Ready { .. } => (Category::Session, Level::Info, "session ready"),
+		Event::Disconnected => (Category::Gateway, Level::Warn, "gateway disconnected"),
+		Event::Resync => (Category::Gateway, Level::Warn, "gateway resync"),
+		_ => return,
+	};
+	diagnostics::record(category, level, label);
 }
 /// Check only navigation whose effective access can change with this event.
 fn access_candidates(state: &State, event: &Event) -> Vec<model::Id> {
@@ -1390,6 +1487,14 @@ fn changes_active_history(state: &State, event: &Event) -> bool {
 	};
 	state.selected == Some(*channel)
 }
+/// Complete the offline group selection's history request before typing is observed.
+#[cfg(feature = "demo")]
+fn select_demo_group(state: &mut State) {
+	if let Some(Command::History { before, after, .. }) = state.select(model::Id(29)) {
+		test_support::load_page_with_cursors(state, before, after);
+	}
+}
+
 /// Synthetic People rows with presence; never a Discord member directory.
 #[cfg(feature = "demo")]
 fn demo_members(
@@ -1626,7 +1731,7 @@ impl Desktop {
 		#[cfg(feature = "demo")]
 		if demo && std::env::args().any(|arg| arg == "--demo-group-dm") {
 			// Existing synthetic group conversation; no account or call is opened.
-			let _ = state.select(model::Id(29));
+			select_demo_group(&mut state);
 		}
 		#[cfg(feature = "demo")]
 		if demo && std::env::args().any(|arg| arg == "--demo-voice-failed") {
@@ -1699,6 +1804,7 @@ impl Desktop {
 							tertiary_color: None,
 							position: 2,
 							hoist: true,
+							managed: false,
 						},
 						model::permissions::Role {
 							id: model::Id(9002),
@@ -1709,6 +1815,7 @@ impl Desktop {
 							tertiary_color: gradient_roles.then_some(16761760),
 							position: 1,
 							hoist: true,
+							managed: false,
 						},
 					]);
 				}
@@ -1858,6 +1965,11 @@ impl Desktop {
 		if demo && std::env::args().any(|arg| arg == "--demo-game-activity") {
 			messaging.share_game_activity = true;
 			messaging.own_game = Some("Playing osu!".into());
+		}
+		// `--demo-steady-refresh`: the steady refresh setting starts on, for frame-cadence samples.
+		#[cfg(feature = "demo")]
+		if demo && std::env::args().any(|arg| arg == "--demo-steady-refresh") {
+			messaging.steady_refresh_rate = true;
 		}
 		// `--demo-call-stream`: the direct-message peer shares a synthetic screen this device is
 		// watching, so the stream stage renders offline without any capture or network.
@@ -2302,8 +2414,17 @@ impl Desktop {
 			.winit_window()
 			.ok_or("Native window unavailable")?
 			.clone();
-		messaging.hide_window_decorations = cfg!(target_os = "linux") && !window.is_decorated();
+		// The window starts undecorated for either "hide decorations" or the custom title bar;
+		// the saved preferences, not the live window, say which of the two it was.
+		// The custom bar wins if a hand-edited file enables both.
+		let undecorated = cfg!(target_os = "linux") && !window.is_decorated();
+		messaging.custom_title_bar = undecorated && app_settings.current.custom_title_bar;
+		messaging.hide_window_decorations = undecorated
+			&& app_settings.current.hide_window_decorations
+			&& !messaging.custom_title_bar;
+		let custom_title_bar = messaging.custom_title_bar;
 		app_settings.current.hide_window_decorations = messaging.hide_window_decorations;
+		app_settings.current.custom_title_bar = messaging.custom_title_bar;
 		#[cfg(target_os = "windows")]
 		{
 			use winit::platform::windows::{CornerPreference, WindowExtWindows as _};
@@ -2379,6 +2500,8 @@ impl Desktop {
 			monitor_geometry: None,
 			monitor_period: None,
 			frame_metrics: FrameMetrics::new(frame_sample),
+			window_minimum: None,
+			geometry_rest: app_settings::GeometryRest::default(),
 			#[cfg(feature = "demo")]
 			rendering_demo: (demo && std::env::args().any(|arg| arg == "--demo-rendering"))
 				.then(rendering_demo::RenderingDemo::default),
@@ -2397,7 +2520,7 @@ impl Desktop {
 			appearance: egui::ThemePreference::System,
 			appearance_changed: false,
 			transparency_available,
-			window_transparent: transparency_available,
+			window_transparent: transparency_available || custom_title_bar,
 			reading,
 			app_settings,
 			font_picker: None,
@@ -2427,6 +2550,10 @@ impl Desktop {
 			pending_account_save: None,
 			current_login: None,
 			plaintext_login,
+			log_directory: local_store::data_dir().ok().map(|root| root.join("logs")),
+			log_verified: false,
+			log_open_refused: false,
+			diagnostics_save: None,
 			plaintext_save_pending: [false; 2],
 			account_presences: std::collections::BTreeMap::new(),
 			presence_load_pending,
@@ -2503,6 +2630,184 @@ impl Desktop {
 			}
 		}
 		false
+	}
+	/// Applies the owner's diagnostic log choice and opens the log folder when the page asks for
+	/// it. The first frame also reports a start-up install that could not write, so the page
+	/// explains instead of promising a file. Nothing here touches an account or a service.
+	fn sync_diagnostics_log(&mut self, ctx: &egui::Context) {
+		if self.fixture_only || self.state.demo {
+			self.messaging.open_log_folder_requested = false;
+			return;
+		}
+		let level = self.messaging.diagnostics_log;
+		if diagnostics::level() != level || !self.log_verified {
+			self.log_verified = true;
+			self.apply_diagnostics_log(level);
+		}
+		if diagnostics::install_status() == diagnostics::InstallStatus::Pending {
+			ctx.request_repaint_after(Duration::from_millis(50));
+			return;
+		}
+		self.messaging.diagnostics_log_failed =
+			diagnostics::install_status() == diagnostics::InstallStatus::Failed;
+		self.messaging.diagnostics_log_path =
+			diagnostics::path().map(|path| path.display().to_string());
+		if self.messaging.open_log_folder_requested {
+			self.messaging.open_log_folder_requested = false;
+			self.messaging.diagnostics_log_open_failed = false;
+			// A folder repaired outside the app starts working here instead of after a restart.
+			if self.messaging.diagnostics_log_failed {
+				self.apply_diagnostics_log(self.messaging.diagnostics_log);
+				ctx.request_repaint_after(Duration::from_millis(50));
+				return;
+			}
+			let folder = diagnostics::path()
+				.and_then(|path| path.parent().map(std::path::Path::to_path_buf))
+				.or_else(|| self.log_directory.clone());
+			if let Some(folder) = folder {
+				// A button that appears to do nothing is worse than a logged reason. Once the
+				// system has refused the shell for this process, asking again only repeats the
+				// refusal, so the path goes to the clipboard instead.
+				if self.log_open_refused {
+					ctx.copy_text(folder.display().to_string());
+					self.messaging.diagnostics_log_open_failed = true;
+				} else if let Err(code) = platform::open_folder(&folder) {
+					self.log_open_refused = true;
+					self.messaging.diagnostics_log_open_failed = true;
+					// The system refused the shell; the path still has to reach the owner.
+					ctx.copy_text(folder.display().to_string());
+					diagnostics::record_fields(
+						diagnostics::Category::App,
+						diagnostics::Level::Warn,
+						"log folder not opened",
+						&[("code", code.into())],
+					);
+					// Whether process creation works at all separates a shell policy from a
+					// security product that blocks this binary from starting anything.
+					match platform::spawn_probe() {
+						Ok(()) => diagnostics::record(
+							diagnostics::Category::App,
+							diagnostics::Level::Warn,
+							"process creation works",
+						),
+						Err(probe) => diagnostics::record_fields(
+							diagnostics::Category::App,
+							diagnostics::Level::Warn,
+							"process creation refused",
+							&[("code", probe.into())],
+						),
+					}
+				}
+			}
+		}
+	}
+	/// Applies a log level, names the file in the page and reports a folder that cannot be written
+	/// instead of promising one. A machine with no resolvable data folder still gets a log: the
+	/// crate falls back to its own folder in the temporary directory and the page names it.
+	fn apply_diagnostics_log(&mut self, level: diagnostics::Level) {
+		let directory = self
+			.log_directory
+			.clone()
+			.unwrap_or_else(diagnostics::fallback_directory);
+		diagnostics::install(level, directory);
+		self.messaging.diagnostics_log_failed = false;
+		self.messaging.diagnostics_log_path =
+			diagnostics::path().map(|path| path.display().to_string());
+	}
+	/// One text file for a bug report: environment, subsystem statuses and the recent log. Every
+	/// value is a flag, a number, or a status string the interface already shows; account, channel,
+	/// message, path and credential values stay out of it.
+	fn diagnostics_report(&self, ctx: &egui::Context) -> String {
+		use std::fmt::Write;
+		let mut report = String::with_capacity(24 * 1024);
+		report.push_str("# Serein diagnostics\n\n");
+		report.push_str(&self.messaging.diagnostic_info(ctx));
+		report.push('\n');
+		let log_file = diagnostics::path()
+			.map(|path| path.display().to_string())
+			.unwrap_or_else(|| "none".into());
+		let _ = writeln!(report, "\n- **Log level:** {:?}", diagnostics::level());
+		let _ = writeln!(report, "- **Log file:** {log_file}");
+		let _ = writeln!(report, "- **Local cache:** {}", self.cache_status);
+		let _ = writeln!(report, "- **Saved login:** {}", self.credential_status);
+		let _ = writeln!(
+			report,
+			"- **Session:** authenticated={} gateway={}",
+			self.state.auth == AuthState::Authenticated,
+			self.state.gateway_connected
+		);
+		let call = match self.state.voice.active.as_ref() {
+			Some(call) if call.phase == client_core::voice::Phase::Failed => "failed",
+			Some(_) => "active",
+			None => "none",
+		};
+		let _ = writeln!(report, "- **Call:** {call}");
+		let _ = writeln!(
+			report,
+			"- **Voice devices:** {}",
+			self.messaging.voice_device_status
+		);
+		let _ = writeln!(
+			report,
+			"- **Notifications:** {}",
+			self.messaging.notification_status
+		);
+		report.push_str("\n## Recent log\n\n```\n");
+		report.push_str(&diagnostics::recent(400));
+		report.push_str("\n```\n");
+		report
+	}
+	/// Writes that report after the owner picks a destination, and names the file in the page.
+	fn sync_diagnostics_save(&mut self, ctx: &egui::Context) {
+		if std::mem::take(&mut self.messaging.diagnostics_save_requested)
+			&& self.diagnostics_save.is_none()
+		{
+			let report = self.diagnostics_report(ctx);
+			let (send, receive) = std::sync::mpsc::sync_channel(1);
+			let parent = self.window.clone();
+			let wake = ctx.clone();
+			self.runtime.spawn(async move {
+				let destination =
+					platform::save::text_destination(parent, "serein-diagnostics.txt").await;
+				let outcome = match destination {
+					Some(path) => {
+						let written = path.clone();
+						match tokio::task::spawn_blocking(move || std::fs::write(&written, report))
+							.await
+						{
+							Ok(Ok(())) => Some(Ok(path)),
+							_ => Some(Err(())),
+						}
+					}
+					// The owner closed the dialog: nothing to report and nothing to hide.
+					None => None,
+				};
+				let _ = send.send(outcome);
+				wake.request_repaint();
+			});
+			self.diagnostics_save = Some(receive);
+		}
+		if let Some(receiver) = &self.diagnostics_save
+			&& let Ok(outcome) = receiver.try_recv()
+		{
+			match outcome {
+				Some(Ok(path)) => {
+					self.messaging.diagnostics_saved_path = Some(path.display().to_string());
+					diagnostics::record(
+						diagnostics::Category::App,
+						diagnostics::Level::Info,
+						"diagnostics saved",
+					);
+				}
+				Some(Err(())) => diagnostics::record(
+					diagnostics::Category::App,
+					diagnostics::Level::Warn,
+					"diagnostics not saved",
+				),
+				None => {}
+			}
+			self.diagnostics_save = None;
+		}
 	}
 	/// Hands the owner's plaintext saved-login choice to the credential worker, in order with
 	/// its other writes, and saves a login that failed earlier for want of a keyring.
@@ -3272,6 +3577,10 @@ impl Desktop {
 	}
 	/// Dispatches one queued command to the demo or live transport.
 	fn command(&mut self, command: Command) {
+		// The offline preview has no one to tell.
+		if matches!(command, Command::Typing { .. }) && (self.state.demo || self.fixture_only) {
+			return;
+		}
 		if !self.state.gateway_connected
 			&& self.state.auth == AuthState::Authenticated
 			&& matches!(command, Command::Send { .. })
@@ -3482,6 +3791,8 @@ impl Desktop {
 		#[cfg(feature = "demo")]
 		if self.state.demo {
 			let event = match command {
+				// Offline typing has no transport or synthetic state change.
+				Command::Typing { .. } => return,
 				// Offline previews confirm locally; nothing reaches the service.
 				Command::BadgeSettings { request, settings } => Event::BadgeSettings {
 					request,
@@ -3795,6 +4106,23 @@ impl Desktop {
 						thread,
 						request,
 						result: Ok(message),
+					}
+				}
+				Command::ThreadPreview {
+					thread, request, ..
+				} => {
+					// The fixture card shows one synthetic latest reply; its channel is the
+					// state's when the demo loaded the thread.
+					let channel = self.state.channel(thread).cloned();
+					let mut message = test_support::message(thread.0 + 3, thread);
+					message.content = "The latest synthetic reply in this thread.".into();
+					Event::ThreadPreview {
+						thread,
+						request,
+						result: Ok(client_core::thread_previews::Loaded {
+							channel,
+							last: Some(message),
+						}),
 					}
 				}
 				Command::CreatePost {
@@ -4708,6 +5036,8 @@ impl Desktop {
 		}
 		self.retry_history_clears();
 		self.sync_plaintext_login();
+		self.sync_diagnostics_log(ctx);
+		self.sync_diagnostics_save(ctx);
 		let mut results = Vec::new();
 		if let Some(store) = &mut self.store {
 			for _ in 0..4 {
@@ -4982,6 +5312,7 @@ impl Desktop {
 			{
 				self.extensions.access_changed(&mut self.messaging);
 			}
+			log_session_event(&event.event);
 			self.state.apply(event);
 			if let Some(message) = takeover_notice {
 				self.messaging
@@ -5135,6 +5466,12 @@ impl Desktop {
 			self.queue_cache(operation);
 		}
 		if let Some(failure) = terminal {
+			diagnostics::record_fields(
+				diagnostics::Category::Session,
+				diagnostics::Level::Error,
+				"session stopped",
+				&[("reason", failure.label().into())],
+			);
 			for (setting, scope) in [
 				("SEREIN_MEMBER_DIAGNOSTICS", "members"),
 				("SEREIN_GATEWAY_DIAGNOSTICS", "gateway"),
@@ -5269,18 +5606,62 @@ impl Desktop {
 			ctx.request_repaint();
 		}
 	}
+	/// Clip the finished frame to a rounded window shape for the custom Linux title bar.
+	#[cfg(target_os = "linux")]
+	fn round_window_corners(&self, ctx: &egui::Context, frame: &eframe::Frame) {
+		let square = ctx.input(|i| {
+			i.viewport().maximized.unwrap_or(false) || i.viewport().fullscreen.unwrap_or(false)
+		});
+		if !self.messaging.uses_custom_title_bar() || square || !self.window_transparent {
+			return;
+		}
+		let Some(state) = frame.wgpu_render_state() else {
+			return;
+		};
+		// Debug is the topmost order, above popups and tooltips; a bare layer there is also
+		// drained after the Debug areas. The radius is in native pixels so it ignores the UI
+		// zoom, like the blur region, which is in surface (logical) pixels.
+		let radius = round_corners::RADIUS * self.window.scale_factor() as f32;
+		ctx.layer_painter(egui::LayerId::new(
+			egui::Order::Debug,
+			egui::Id::unique("serein-round-corners"),
+		))
+		.add(round_corners::Mask::callback(
+			ctx.viewport_rect(),
+			state.target_format,
+			radius,
+		));
+	}
 	fn sync_window_effects(&mut self) {
 		if !self.transparency_available {
 			return;
 		}
 		let effects = ui::design::window_effects();
-		let transparent = effects.0 && effects.1 > 0;
+		// The custom Linux title bar keeps alpha for its rounded corners.
+		let transparent = effects_transparent() || self.messaging.uses_custom_title_bar();
 		if transparent != self.window_transparent {
 			self.window.set_transparent(transparent);
 			self.window_transparent = transparent;
 		}
 		if let Some(window_blur) = &mut self.window_blur {
-			window_blur.set_enabled(transparent && effects.2 > 0);
+			#[cfg(target_os = "linux")]
+			{
+				let square = self.window.is_maximized() || self.window.fullscreen().is_some();
+				let shape = (self.messaging.uses_custom_title_bar() && !square).then(|| {
+					let size = self
+						.window
+						.inner_size()
+						.to_logical::<f64>(self.window.scale_factor());
+					[
+						size.width.round() as i32,
+						size.height.round() as i32,
+						round_corners::RADIUS as i32,
+					]
+				});
+				window_blur.set_rounded_shape(shape);
+			}
+			// Only the user's own effect settings enable blur, not the custom title bar's alpha.
+			window_blur.set_enabled(effects_transparent() && effects.2 > 0);
 		}
 	}
 	/// Frame period of the display the window is on; egui otherwise assumes 60 Hz.
@@ -5289,19 +5670,25 @@ impl Desktop {
 	}
 	fn refresh_monitor(&mut self) -> Option<Duration> {
 		let monitor = self.window.current_monitor()?;
-		app_settings::update_window_minimum(&self.window, &monitor);
+		app_settings::update_window_minimum(&self.window, &monitor, &mut self.window_minimum);
 		let millihertz = monitor.refresh_rate_millihertz()?;
 		(1_000..=1_000_000)
 			.contains(&millihertz)
 			.then(|| Duration::from_secs_f64(1000.0 / f64::from(millihertz)))
 	}
 }
+/// Whether the user's transparency settings, not just the rounded-corner mask, show through.
+fn effects_transparent() -> bool {
+	let (enabled, transparency, _) = ui::design::window_effects();
+	enabled && transparency > 0
+}
 impl eframe::App for Desktop {
 	fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
-		if self.window_transparent {
+		if self.window_transparent && effects_transparent() {
 			egui::Color32::TRANSPARENT.to_normalized_gamma_f32()
 		} else {
-			// Opaque windows need opaque pixels too, including uncovered panel corners.
+			// Opaque windows need opaque pixels too, including uncovered panel corners. A
+			// window transparent only for the rounded-corner mask stays opaque inside it.
 			visuals.panel_fill.to_opaque().to_normalized_gamma_f32()
 		}
 	}
@@ -5329,16 +5716,8 @@ impl eframe::App for Desktop {
 		{
 			// While maximized, keep the normal geometry so un-maximizing after a restart returns to it.
 			let geometry = if viewport.maximized == Some(true) {
-				local_store::WindowGeometry {
-					maximized: true,
-					..self.app_settings.current.window_geometry.unwrap_or(
-						local_store::WindowGeometry {
-							size: app_settings::DEFAULT_WINDOW_SIZE,
-							position: None,
-							maximized: true,
-						},
-					)
-				}
+				self.geometry_rest
+					.maximized_geometry(self.app_settings.current.window_geometry)
 			} else {
 				let size = self
 					.window
@@ -5354,17 +5733,37 @@ impl eframe::App for Desktop {
 					maximized: false,
 				}
 			};
-			if geometry.is_valid() && self.app_settings.current.window_geometry != Some(geometry) {
+			if geometry.is_valid() {
+				match self.geometry_rest.observe(
+					geometry,
+					self.app_settings.current.window_geometry,
+					std::time::Instant::now(),
+				) {
+					app_settings::Observation::Saved => {}
+					app_settings::Observation::Pending => {
+						ctx.request_repaint_after(app_settings::GEOMETRY_REST_DELAY);
+					}
+					app_settings::Observation::Commit => {
+						self.app_settings.current.window_geometry = Some(geometry);
+						self.app_settings.state.dirty = true;
+					}
+				}
+			}
+		} else if !self.fixture_only && !self.state.demo && self.app_settings.loaded {
+			// A window that closes or hides before it rests still keeps its last placement.
+			if let Some(geometry) = self.geometry_rest.take_pending() {
 				self.app_settings.current.window_geometry = Some(geometry);
 				self.app_settings.state.dirty = true;
 			}
 		}
-		// Monitor size also detects Wayland moves without a global window position.
+		// Monitor size also detects Wayland moves without a global window position. A focus change
+		// re-reads the refresh rate as well: display settings change it without moving the window.
 		if let Some(viewport) = raw_input.viewports.get(&raw_input.viewport_id) {
 			let geometry = (
 				viewport.outer_rect,
 				viewport.native_pixels_per_point,
 				viewport.monitor_size,
+				raw_input.focused,
 			);
 			if self.monitor_geometry != Some(geometry) {
 				self.monitor_geometry = Some(geometry);
@@ -5392,6 +5791,12 @@ impl eframe::App for Desktop {
 		}
 	}
 	fn on_exit(&mut self) {
+		diagnostics::record(
+			diagnostics::Category::App,
+			diagnostics::Level::Info,
+			"exiting",
+		);
+		diagnostics::flush(std::time::Duration::from_millis(500));
 		// Later launches start a new client instead of waking this one while it shuts down.
 		self.instance.release();
 		if self.updater.finish_restart().is_err() {
@@ -5423,13 +5828,50 @@ impl eframe::App for Desktop {
 		);
 		self.messaging.sync_reading_zoom(ctx);
 		self.poll(ctx);
+		// Here, not in `ui`: a connection made while hidden in the tray must still go idle.
+		if let Some(connection) = &mut self.connection {
+			// shortcut: the timeout is read once per connection; a change made on another
+			// device is picked up on the next connect, not live.
+			if connection.idle_timeout.has_changed().unwrap_or(false) {
+				if let Some(secs) = *connection.idle_timeout.borrow_and_update() {
+					connection.idle_timeout_synced = Some(secs);
+					self.messaging.idle_timeout_secs = secs;
+				}
+			} else if let Some(synced) = connection.idle_timeout_synced
+				&& synced != self.messaging.idle_timeout_secs
+			{
+				connection.idle_timeout_synced = Some(self.messaging.idle_timeout_secs);
+				connection
+					.idle_timeout_edits
+					.send_replace(Some(self.messaging.idle_timeout_secs));
+			}
+			self.messaging.idle_timeout_status =
+				connection.idle_timeout_error.borrow().unwrap_or_default();
+			// Not during voice calls (a failed call waiting to be dismissed is not one): the
+			// poller treats `None` as off.
+			let in_call = self
+				.state
+				.voice
+				.active
+				.as_ref()
+				.is_some_and(|call| call.phase != client_core::voice::Phase::Failed);
+			let timeout = (self.messaging.auto_idle && !in_call)
+				.then(|| Duration::from_secs(self.messaging.idle_timeout().into()));
+			connection
+				.auto_idle
+				.send_if_modified(|current| std::mem::replace(current, timeout) != timeout);
+		}
+		self.messaging.auto_idle_active = self
+			.connection
+			.as_ref()
+			.is_some_and(|connection| *connection.afk.borrow());
 		self.sync_fonts(ctx);
 		self.hotkeys.sync(&self.messaging.keybinds, &self.runtime);
 		self.messaging.global_keybind_status = self.hotkeys.status();
 		let voice_toggles = self.hotkeys.take_toggle_pending()
 			| self
 				.messaging
-				.voice_toggle_pressed(ctx, self.hotkeys.global_toggle_mask());
+				.voice_toggle_pressed(ctx, |action, chord| self.hotkeys.is_global(action, chord));
 		if voice_toggles != 0 && !self.fixture_only {
 			// Toggle from the newest choice; a mute and deafen in one frame apply in order.
 			let mut latest = None;
@@ -5643,6 +6085,21 @@ impl eframe::App for Desktop {
 		self.messaging.voice_ptt_active = self.messaging.voice_push_to_talk
 			&& self.state.voice.active.is_some()
 			&& (self.messaging.push_to_talk_down(ctx) || self.hotkeys.push_to_talk_down());
+		self.notification_runtime.ptt(
+			self.messaging.voice_push_to_talk,
+			!self.fixture_only
+				&& !self.state.demo
+				&& self.state.auth == AuthState::Authenticated
+				&& self.state.voice.active.as_ref().is_some_and(|call| {
+					matches!(
+						call.phase,
+						client_core::voice::Phase::Connected | client_core::voice::Phase::Waiting
+					)
+				}),
+			self.messaging.voice_ptt_active,
+			self.messaging.notification_options,
+			ctx,
+		);
 		self.messaging.voice_ptm_active = self.state.voice.active.is_some()
 			&& (self.messaging.push_to_mute_down(ctx) || self.hotkeys.push_to_mute_down());
 		if self.state.auth == AuthState::Authenticated || self.state.demo {
@@ -5655,6 +6112,18 @@ impl eframe::App for Desktop {
 			// Speaking, notices, remote video, devices, hotkeys and deadlines each wake the UI
 			// themselves; this heartbeat only bounds a missed wake, so a call does not repaint at 20 Hz.
 			ctx.request_repaint_after(std::time::Duration::from_secs(1));
+		}
+		// Variable refresh rate displays follow the focused window's presents, so redrawing only on
+		// change swings them between their limits and flickers (#889). The opt-in steady rate asks
+		// for the next frame within half a refresh: a Fifo present blocks until the next refresh
+		// anyway, and a surface that stops blocking (locked or occluded) cannot spin a core.
+		if self.messaging.steady_refresh_rate
+			&& ctx.input(|input| {
+				input.focused
+					&& input.viewport().minimized != Some(true)
+					&& input.viewport().occluded != Some(true)
+			}) {
+			ctx.request_repaint_after(self.frame_period().unwrap_or(Duration::from_millis(16)) / 2);
 		}
 	}
 	fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
@@ -6532,9 +7001,12 @@ impl eframe::App for Desktop {
 		}
 		let appearance = ctx.options(|options| options.theme_preference);
 		#[cfg(target_os = "linux")]
-		if self.window.is_decorated() == self.messaging.hide_window_decorations {
-			self.window
-				.set_decorations(!self.messaging.hide_window_decorations);
+		{
+			let undecorated =
+				self.messaging.hide_window_decorations || self.messaging.custom_title_bar;
+			if self.window.is_decorated() == undecorated {
+				self.window.set_decorations(!undecorated);
+			}
 		}
 		#[cfg(target_os = "windows")]
 		if self.window.is_decorated() != self.messaging.hide_title_bar {
@@ -6720,7 +7192,12 @@ impl eframe::App for Desktop {
 				None => {}
 			}
 		}
-		ui::design::window_resize(&ctx);
+		ui::design::window_resize_if(
+			&ctx,
+			cfg!(target_os = "windows") || self.messaging.uses_custom_title_bar(),
+		);
+		#[cfg(target_os = "linux")]
+		self.round_window_corners(&ctx, frame);
 		self.frame_metrics.reflows = self.messaging.timeline_reflows();
 		self.frame_metrics.finish();
 	}
@@ -6736,6 +7213,36 @@ fn plaintext_login_dir() -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	#[cfg(feature = "demo")]
+	#[test]
+	fn group_demo_loads_history_before_observing_typing() {
+		let mut state = test_support::demo_state();
+		select_demo_group(&mut state);
+		assert_eq!(state.selected, Some(model::Id(29)));
+		assert!(
+			!state.history_pending,
+			"group fixture must finish its history request"
+		);
+		assert!(state.timeline.iter().next().is_some());
+		let now = std::time::Instant::now();
+		let wall = std::time::SystemTime::now();
+		state.observe_typing_at(
+			client_core::typing::Signal {
+				channel: model::Id(29),
+				user: model::Id(2),
+				timestamp: wall
+					.duration_since(std::time::UNIX_EPOCH)
+					.unwrap()
+					.as_secs(),
+			},
+			wall,
+			now,
+		);
+		assert_eq!(
+			state.typing_users(now).collect::<Vec<_>>(),
+			vec![model::Id(2)]
+		);
+	}
 	#[test]
 	fn frame_sample_is_bounded_demo_only_and_excludes_warmup() {
 		for (demo, value) in [

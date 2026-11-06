@@ -133,7 +133,7 @@ impl Page {
 			Self::Account => "my account profile logout",
 			Self::Profile => "profile edit display name about me bio pronouns color colour",
 			Self::General => {
-				"general windows macos linux login menu bar startup autostart automatically open minimized minimize close tray background title bar caption window buttons decorations borderless tiling graphics gpu adapter render discrete integrated hardware acceleration performance battery"
+				"general windows macos linux login menu bar startup autostart automatically open minimized minimize close tray background title bar caption window buttons decorations borderless tiling graphics gpu adapter render discrete integrated hardware acceleration performance battery vrr variable refresh rate steady refresh rate g-sync gsync freesync adaptive sync flicker flickering steady frame rate fps vsync"
 			}
 			Self::Appearance => {
 				"appearance customization font typography import ttf otf primary accent hex window effects transparency blur theme dark light system mode zoom scale layout sidebar width people members member list reset colour color preset"
@@ -145,7 +145,7 @@ impl Page {
 				"messaging permissions spam filters direct messages dm friend requests personalized connected games"
 			}
 			Self::Notifications => {
-				"notifications desktop system alerts overview sounds badges message ring"
+				"notifications desktop system alerts overview sounds badges message ring idle away afk timeout lock locked phone mobile push"
 			}
 			Self::Activity => {
 				"game activity playing osu status presence sharing registered games added current game detection detected process program executable rename wrong add hide last played"
@@ -252,10 +252,9 @@ impl MessagingUi {
 						.iter()
 						.any(|event| matches!(event, egui::Event::Ime(_)))
 			}) && ctx.input_mut(|input| {
-			crate::keybinds::pressed(
-				input,
-				self.keybinds.chord(model::KeybindAction::ShowShortcuts),
-			)
+			self.keybinds
+				.chords(model::KeybindAction::ShowShortcuts)
+				.any(|chord| crate::keybinds::pressed(input, chord))
 		}) {
 			self.settings.open = true;
 			self.settings.page = Page::Keybinds;
@@ -507,10 +506,9 @@ impl MessagingUi {
 		}
 		if self.keybind_capture.is_none()
 			&& ctx.input_mut(|input| {
-				crate::keybinds::pressed_exact(
-					input,
-					self.keybinds.chord(model::KeybindAction::CloseOverlay),
-				)
+				self.keybinds
+					.chords(model::KeybindAction::CloseOverlay)
+					.any(|chord| crate::keybinds::pressed_exact(input, chord))
 			}) {
 			self.settings.open = false;
 		}
@@ -879,14 +877,16 @@ impl MessagingUi {
 		design::group(ui, &title, |ui| {
 			#[cfg(target_os = "linux")]
 			{
-				let label = language.text("general-hide-decorations");
-				let description = language.text("general-hide-decorations-description");
-				design::switch(
-					ui,
-					&label,
-					Some(&description),
-					&mut self.hide_window_decorations,
-				);
+				// Hiding every decoration and drawing Serein's own bar contradict each other:
+				// whichever switch was just turned on wins. The "no title bar" switch is at the
+				// bottom of this group, since it is only for tiling window managers.
+				let label = language.text("general-custom-title-bar");
+				let description = language.text("general-custom-title-bar-description");
+				if design::switch(ui, &label, Some(&description), &mut self.custom_title_bar)
+					.changed() && self.custom_title_bar
+				{
+					self.hide_window_decorations = false;
+				}
 				design::card_divider(ui);
 			}
 			#[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -915,6 +915,22 @@ impl MessagingUi {
 				design::hint(ui, &language.text("general-tray-unavailable"));
 			} else if !self.tray_status.is_empty() {
 				design::hint(ui, self.tray_status);
+			}
+			#[cfg(target_os = "linux")]
+			{
+				design::card_divider(ui);
+				let label = language.text("general-hide-decorations");
+				let description = language.text("general-hide-decorations-description");
+				if design::switch(
+					ui,
+					&label,
+					Some(&description),
+					&mut self.hide_window_decorations,
+				)
+				.changed() && self.hide_window_decorations
+				{
+					self.custom_title_bar = false;
+				}
 			}
 		});
 		let title = language.text("general-graphics");
@@ -946,6 +962,15 @@ impl MessagingUi {
 						}
 					});
 			});
+			design::card_divider(ui);
+			let label = language.text("general-steady-refresh-rate");
+			let description = language.text("general-steady-refresh-rate-description");
+			design::switch(
+				ui,
+				&label,
+				Some(&description),
+				&mut self.steady_refresh_rate,
+			);
 		});
 	}
 

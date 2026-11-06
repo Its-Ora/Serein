@@ -51,8 +51,10 @@ general-start-minimized = Start minimized
 general-start-minimized-description = Start in the background, out of your way.
 general-startup-unavailable = Automatic startup is available on Windows and macOS.
 general-window = Window
-general-hide-decorations = Hide window decorations
-general-hide-decorations-description = Remove the system title bar and borders. Use your window manager to move, resize or close Serein.
+general-hide-decorations = No title bar
+general-hide-decorations-description = For tiling window managers: remove every title bar and border, including Serein's own. Move, resize and close Serein with your window manager.
+general-custom-title-bar = Custom title bar
+general-custom-title-bar-description = Replace the system title bar with Serein's own GTK 4 style header bar.
 general-hide-title-bar = Hide Serein title bar
 general-hide-title-bar-description = Use the system title bar and window buttons instead.
 general-keep-menu-bar = Keep Serein in the menu bar
@@ -65,6 +67,8 @@ general-graphics = Graphics
 general-render-with = Render with
 general-gpu-restart = Takes effect the next time Serein starts.
 general-gpu-current-prefix = Currently drawing with
+general-steady-refresh-rate = Steady refresh rate
+general-steady-refresh-rate-description = While Serein is the active window, draw at the display's refresh rate so variable refresh rate (VRR, G-SYNC, FreeSync) displays can hold one rate instead of flickering. Uses more power.
 gpu-automatic = Automatic
 gpu-high-performance = High performance
 gpu-power-saving = Power saving
@@ -85,7 +89,6 @@ hide-chat = Hide chat
 show-chat = Show chat
 search-conversation = Search this conversation
 show-member-list = Show member list
-show-user-profile = Show user profile
 pinned-messages = Pinned messages
 threads = Threads
 
@@ -1548,6 +1551,14 @@ join-server-status-invite-accepted = Invite accepted. Waiting for server access.
 join-server-status-offline-preview = Offline preview — joining servers is disabled.
 
 ## crates/ui/src/keybinds.rs
+# Context: custom_row
+keybinds-custom-row-remove = Remove
+# Context: custom_section
+keybinds-custom-section-add-binding = Add binding
+# Context: custom_section
+keybinds-custom-section-add-extra-shortcuts-for-any-action-each-key-or-mouse-button-combination-can-only-be-used-once = Add extra shortcuts for any action. Each key or mouse-button combination can only be used once.
+# Context: custom_section
+keybinds-custom-section-custom-bindings = Custom bindings
 # Context: row
 keybinds-row-global = GLOBAL
 # Context: row
@@ -1790,6 +1801,10 @@ notification-settings-notification-settings-for-per-channel-or-per-server-notifi
 notification-settings-notification-settings-open = Open
 # Context: notification_settings
 notification-settings-notification-settings-preview-sound = Preview Sound
+# Context: notification_settings
+notification-settings-notification-settings-push-to-talk-activate = Push to Talk Activate
+# Context: notification_settings
+notification-settings-notification-settings-push-to-talk-deactivate = Push to Talk Deactivate
 # Context: notification_settings
 notification-settings-notification-settings-ringtones-call-devices-and-microphone-processing = Ringtones, call devices and microphone processing.
 # Context: notification_settings
@@ -2256,6 +2271,12 @@ screen-body-frame-rate = Frame rate
 screen-body-include-the-pointer-in-the-shared-video = Include the pointer in the shared video.
 # Context: body
 screen-body-quality = Quality
+# Context: body
+screen-body-source = Source
+# Context: body
+screen-preview-paused-title = Your stream is still running!
+# Context: body
+screen-preview-paused-body = We've paused this preview to save your resources.
 # Context: body
 screen-body-quality-selection-does-not-require-nitro = Quality selection does not require Nitro.
 # Context: body
@@ -3999,7 +4020,29 @@ updates-update-settings-restart-to-update = Restart to update
 # Context: update_settings
 updates-update-settings-serein-was-installed-via-your-distribution-run-this-in-a = Serein was installed via your distribution. Run this in a terminal to update.
 # Context: update_settings
+updates-update-settings-save-diagnostics = Save diagnostics
+# Context: update_settings
 updates-update-settings-support-diagnostics = Support & diagnostics
+# Context: update_settings
+updates-update-settings-copy-recent-lines = Copy recent lines
+# Context: update_settings
+updates-update-settings-diagnostic-log = Diagnostic log
+# Context: update_settings
+updates-update-settings-log-errors = Errors
+# Context: update_settings
+updates-update-settings-log-events = Errors, warnings and events
+# Context: update_settings
+updates-update-settings-log-everything = Everything (verbose)
+# Context: update_settings
+updates-update-settings-log-off = Off
+# Context: update_settings
+updates-update-settings-log-warnings = Errors and warnings
+# Context: update_settings
+updates-update-settings-open-folder = Open folder
+# Context: update_settings
+updates-update-settings-the-log-folder-could-not-be-written = The log folder could not be written. Check Serein's data folder and try again.
+# Context: update_settings
+updates-update-settings-timings-stages-and-failures-in-one-local-file-no-account-channel-or = Timings, stages and failures in one local log file. Account, channel, message and credential data are never written, and nothing is uploaded.
 # Context: update_log
 updates-update-log = Update log
 # Context: update_settings
@@ -4493,6 +4536,7 @@ lib-composer-onboarding-incomplete = Finish joining this server to unlock more c
 lib-composer-onboarding-complete = Complete Onboarding
 profiles-message-placeholder = Message @{ $user }
 profiles-message-send = Send message
+profiles-message-open-chat = Open chat
 profiles-message-sending = Opening direct message…
 user-menu-contents-start-a-call = Start a Call
 verification-show-complete-the-check-to-open-this-conversation = Complete the check to open this conversation.
@@ -4647,6 +4691,14 @@ settings-convert-emoticons = Automatically convert emoticons in your messages to
 settings-convert-emoticons-description = Convert standalone emoticons such as :) to 🙂 when sending or editing messages. Code and links stay unchanged.
 settings-preload-on-hover = Preload on hover
 settings-preload-on-hover-description = Load a conversation, a profile or the GIF picker while the pointer rests on it, so it opens instantly. Uses the same requests as opening it, at most 12 per minute for each kind.
+settings-auto-idle = Go idle when away
+settings-auto-idle-description = Show as Idle after the time below without keyboard or mouse input, or right away when you lock your computer. Not during voice calls.
+settings-idle-after = Idle after
+settings-idle-after-minutes =
+    { $count ->
+        [one] { $count } minute
+       *[other] { $count } minutes
+    }
 
 profiles-board = Board
 profiles-board-unavailable = This profile’s board is unavailable.
@@ -4829,6 +4881,9 @@ timeline-group-intro = Welcome to the beginning of the { $name } group.
 timeline-channel-intro-title = Welcome to #{ $channel }!
 # Context: timeline_channel_intro
 timeline-channel-intro-start = This is the start of the #{ $channel } channel.
+show-user-profile = Show User Profile
+hide-user-profile = Hide User Profile
+view-full-profile = View Full Profile
 # Context: text_menu
 text-menu-cut = Cut
 text-menu-copy = Copy
@@ -4926,6 +4981,9 @@ profiles-private-notice = { $name }’s profile is private, so some info is hidd
 settings-cosmetics-name-styles = Name styles
 settings-cosmetics-name-styles-description = Nitro display name fonts, colours and effects.
 main-sign-in-rate-limited-detail = Discord is rate limiting this sign-in. Wait before trying again. Another attempt before that can make the wait longer.
+
+# Avatar badge while someone is typing.
+typing-badge-typing = Typing…
 
 # New message
 new-message-title = New Message

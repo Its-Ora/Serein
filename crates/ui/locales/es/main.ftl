@@ -51,8 +51,10 @@ general-start-minimized = Empezar minimizado
 general-start-minimized-description = Comience en segundo plano, fuera de su camino.
 general-startup-unavailable = El inicio automático está disponible en Windows y macOS.
 general-window = Ventana
-general-hide-decorations = Ocultar decoraciones de ventanas
-general-hide-decorations-description = Elimine la barra de título y los bordes del sistema. Utilice su administrador de ventanas para mover, cambiar el tamaño o cerrar Serein.
+general-hide-decorations = Sin barra de título
+general-hide-decorations-description = Para gestores de ventanas en mosaico: elimina todas las barras de título y bordes, incluida la propia de Serein. Mueve, cambia el tamaño o cierra Serein con tu gestor de ventanas.
+general-custom-title-bar = Barra de título personalizada
+general-custom-title-bar-description = Sustituye la barra de título del sistema por la barra de encabezado propia de Serein, al estilo de GTK 4.
 general-hide-title-bar = Ocultar barra de título de Serein
 general-hide-title-bar-description = Utilice la barra de título del sistema y los botones de ventana en su lugar.
 general-keep-menu-bar = Mantener Serein en la barra de menú
@@ -65,6 +67,8 @@ general-graphics = Gráficos
 general-render-with = Renderizar con
 general-gpu-restart = Entra en vigor la próxima vez que se inicie Serein.
 general-gpu-current-prefix = Actualmente dibujando con
+general-steady-refresh-rate = Frecuencia de actualización estable
+general-steady-refresh-rate-description = Mientras Serein es la ventana activa, se dibuja a la frecuencia de actualización de la pantalla, de modo que las pantallas con frecuencia de actualización variable (VRR, G-SYNC, FreeSync) pueden mantener una sola frecuencia en lugar de parpadear. Consume más energía.
 gpu-automatic = Automático
 gpu-high-performance = Rendimiento alto
 gpu-power-saving = Ahorro de energía
@@ -85,7 +89,6 @@ hide-chat = Ocultar chat
 show-chat = Mostrar chat
 search-conversation = Buscar esta conversación
 show-member-list = Mostrar lista de miembros
-show-user-profile = Mostrar perfil de usuario
 pinned-messages = Mensajes fijados
 threads = Trapos
 
@@ -1536,6 +1539,14 @@ join-server-status-invite-accepted = Invitación aceptada. Esperando acceso al s
 join-server-status-offline-preview = Vista previa sin conexión: unirse a servidores está deshabilitado.
 
 ## crates/ui/src/keybinds.rs
+# Context: custom_row
+keybinds-custom-row-remove = Quitar
+# Context: custom_section
+keybinds-custom-section-add-binding = Añadir atajo
+# Context: custom_section
+keybinds-custom-section-add-extra-shortcuts-for-any-action-each-key-or-mouse-button-combination-can-only-be-used-once = Añade atajos extra para cualquier acción. Cada combinación de tecla o botón del ratón solo puede usarse una vez.
+# Context: custom_section
+keybinds-custom-section-custom-bindings = Atajos personalizados
 # Context: row
 keybinds-row-global = GLOBAL
 # Context: row
@@ -1776,6 +1787,10 @@ notification-settings-notification-settings-for-per-channel-or-per-server-notifi
 notification-settings-notification-settings-open = Abrir
 # Context: notification_settings
 notification-settings-notification-settings-preview-sound = Vista previa del sonido
+# Context: notification_settings
+notification-settings-notification-settings-push-to-talk-activate = Empuja para hablar: activar
+# Context: notification_settings
+notification-settings-notification-settings-push-to-talk-deactivate = Empuja para hablar: desactivar
 # Context: notification_settings
 notification-settings-notification-settings-ringtones-call-devices-and-microphone-processing = Tonos de llamada, dispositivos de llamada y procesamiento de micrófonos.
 # Context: notification_settings
@@ -2242,6 +2257,12 @@ screen-body-frame-rate = Velocidad de fotogramas
 screen-body-include-the-pointer-in-the-shared-video = Incluye el puntero en el vídeo compartido.
 # Context: body
 screen-body-quality = Calidad
+# Context: body
+screen-body-source = Origen
+# Context: body
+screen-preview-paused-title = ¡Tu transmisión sigue en marcha!
+# Context: body
+screen-preview-paused-body = Hemos pausado esta vista previa para ahorrar recursos.
 # Context: body
 screen-body-quality-selection-does-not-require-nitro = La selección de calidad no requiere Nitro.
 # Context: body
@@ -3982,7 +4003,29 @@ updates-update-settings-restart-to-update = Reiniciar para actualizar
 # Context: update_settings
 updates-update-settings-serein-was-installed-via-your-distribution-run-this-in-a = Serein se instaló a través de su distribución. Ejecute esto en una terminal para actualizar.
 # Context: update_settings
+updates-update-settings-save-diagnostics = Guardar diagnóstico
+# Context: update_settings
 updates-update-settings-support-diagnostics = Soporte y diagnóstico
+# Context: update_settings
+updates-update-settings-copy-recent-lines = Copiar líneas recientes
+# Context: update_settings
+updates-update-settings-diagnostic-log = Registro de diagnóstico
+# Context: update_settings
+updates-update-settings-log-errors = Errores
+# Context: update_settings
+updates-update-settings-log-events = Errores, advertencias y eventos
+# Context: update_settings
+updates-update-settings-log-everything = Todo (detallado)
+# Context: update_settings
+updates-update-settings-log-off = Desactivado
+# Context: update_settings
+updates-update-settings-log-warnings = Errores y advertencias
+# Context: update_settings
+updates-update-settings-open-folder = Abrir carpeta
+# Context: update_settings
+updates-update-settings-the-log-folder-could-not-be-written = No se pudo escribir la carpeta del registro. Revisa la carpeta de datos de Serein e inténtalo de nuevo.
+# Context: update_settings
+updates-update-settings-timings-stages-and-failures-in-one-local-file-no-account-channel-or = Tiempos, etapas y fallos en un único archivo de registro local. Nunca se escriben datos de cuenta, canales, mensajes ni credenciales, y no se sube nada.
 # Context: update_log
 updates-update-log = Registro de actualizaciones
 # Context: update_settings
@@ -4456,6 +4499,7 @@ lib-composer-onboarding-incomplete = Termina de unirte a este servidor para desb
 lib-composer-onboarding-complete = Completar bienvenida
 profiles-message-placeholder = Mensaje a @{ $user }
 profiles-message-send = Enviar mensaje
+profiles-message-open-chat = Abrir chat
 profiles-message-sending = Abriendo mensaje directo…
 user-menu-contents-start-a-call = Iniciar llamada
 verification-show-complete-the-check-to-open-this-conversation = Completa la verificación para abrir esta conversación.
@@ -4743,6 +4787,9 @@ timeline-group-intro = Te damos la bienvenida al comienzo del grupo { $name }.
 timeline-channel-intro-title = ¡Te damos la bienvenida a #{ $channel }!
 # Context: timeline_channel_intro
 timeline-channel-intro-start = Este es el comienzo del canal #{ $channel }.
+show-user-profile = Mostrar perfil de usuario
+hide-user-profile = Ocultar perfil de usuario
+view-full-profile = Ver perfil completo
 # Context: text_menu
 text-menu-cut = Cortar
 text-menu-copy = Copiar

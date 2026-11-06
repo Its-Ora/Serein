@@ -29,8 +29,17 @@ mod portal_linux;
 mod video;
 // The shared screen module reaches the platform encoders' keyframe check through this path.
 #[cfg(target_os = "linux")]
+#[path = "../src/video_av1.rs"]
+mod video_av1;
+#[cfg(target_os = "linux")]
+#[path = "../src/video_codec.rs"]
+mod video_codec;
+#[cfg(target_os = "linux")]
 #[path = "../src/video_encode.rs"]
 mod video_encode;
+#[cfg(target_os = "linux")]
+#[path = "../src/video_hevc.rs"]
+mod video_hevc;
 #[cfg(target_os = "linux")]
 #[path = "../src/video_receive.rs"]
 mod video_receive;
@@ -182,8 +191,11 @@ fn main() {
 			assert!(pipeline.frames.try_pull_sample(gst::ClockTime::ZERO).is_none(), "must not encode before secure readiness");
 			if let Some(sample) = pipeline.preview.try_pull_sample(gst::ClockTime::ZERO) {
 				let raw = gstreamer::raw(&sample).unwrap();
-				assert_eq!((raw.width, raw.height), (640, 360));
-				assert_eq!(preview_frame(&raw).unwrap().as_raw().len(), 640 * 360 * 4);
+				assert_eq!((raw.width, raw.height), (settings.width, settings.height));
+				assert_eq!(
+					preview_frame(&raw).unwrap().as_raw().len(),
+					settings.width as usize * settings.height as usize * 4
+				);
 				let pts = sample.buffer().unwrap().pts().expect("preview timestamp");
 				assert!(last_preview_pts.is_none_or(|last| pts > last), "preview must keep advancing");
 				last_preview_pts = Some(pts);
@@ -250,3 +262,8 @@ fn main() {
 fn main() {
 	eprintln!("This debug check requires Linux with GStreamer.");
 }
+
+#[path = "../src/presentation.rs"]
+mod presentation;
+pub use presentation::{PlaybackFrame, Presentation};
+type Frame = [f32; 960];
